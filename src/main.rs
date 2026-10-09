@@ -1,3 +1,4 @@
+mod appearance;
 mod metrics;
 mod network;
 mod platform;
@@ -28,6 +29,10 @@ fn stopped() -> bool {
     about = "Native system metrics. Streams one line per interval; tmux displays the latest line."
 )]
 pub struct Args {
+    /// Validate options/appearance without starting a collector or probing network.
+    #[arg(long)]
+    #[serde(default)]
+    check_config: bool,
     /// Print a single snapshot and exit (CPU is unknown without a previous sample).
     #[arg(long)]
     once: bool,
@@ -73,6 +78,29 @@ pub struct Args {
     server_pid: Option<u32>,
     #[arg(long, default_value = "tmux")]
     tmux_bin: PathBuf,
+    /// Partial JSON appearance override; missing values retain built-in defaults.
+    #[arg(long = "appearance", default_value = "{}")]
+    #[serde(skip)]
+    appearance_input: String,
+    #[arg(long)]
+    #[serde(skip)]
+    appearance_file: Option<PathBuf>,
+    /// Override the CPU label (including desired trailing space or colon).
+    #[arg(long)]
+    #[serde(skip)]
+    cpu_label: Option<String>,
+    #[arg(long)]
+    #[serde(skip)]
+    mem_label: Option<String>,
+    #[arg(long)]
+    #[serde(skip)]
+    separator: Option<String>,
+    #[arg(long, value_parser = ["icons", "text"])]
+    #[serde(skip)]
+    labels: Option<String>,
+    #[arg(skip)]
+    #[serde(default, serialize_with = "appearance::serialize_overrides")]
+    appearance: appearance::Appearance,
     /// Successful probe interval, seconds. Failures back off up to 10x.
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=3600))]
     probe_interval: u64,
@@ -304,7 +332,40 @@ fn main() {
         }
     }
     let _ = STOP.set(stop);
-    if let Err(e) = run(Args::parse())
+    let mut args = Args::parse();
+    let configured = (|| -> Result<appearance::Appearance, String> {
+        let mut style =
+            appearance::Appearance::load(args.appearance_file.as_deref(), &args.appearance_input)?;
+        if let Some(label) = &args.cpu_label {
+            style.cpu_label = label.clone();
+        }
+        if let Some(label) = &args.mem_label {
+            style.mem_label = label.clone();
+        }
+        if let Some(separator) = &args.separator {
+            style.separator = separator.clone();
+        }
+        if let Some(mode) = &args.labels {
+            style.labels = if mode == "text" {
+                appearance::Labels::Text
+            } else {
+                appearance::Labels::Icons
+            };
+        }
+        style.validate()?;
+        Ok(style)
+    })();
+    args.appearance = match configured {
+        Ok(style) => style,
+        Err(error) => {
+            eprintln!("tmux-status: appearance: {error}");
+            std::process::exit(2);
+        }
+    };
+    if args.check_config {
+        return;
+    }
+    if let Err(e) = run(args)
         && e.kind() != io::ErrorKind::BrokenPipe
     {
         eprintln!("tmux-status: {e}");

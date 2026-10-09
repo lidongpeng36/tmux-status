@@ -25,4 +25,4 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tmux
       - if: runner.os == 'macOS'
         run: brew install tmux
-      - run: python3 tests/installer.py && python3 tests/cold_install_lifecycle.py && python3 tests/publisher_lifecycle.py && python3 tests/tmux_lifecycle.py
+      - run: python3 tests/installer.py && python3 tests/cold_install_lifecycle.py && python3 tests/publisher_lifecycle.py && python3 tests/tmux_lifecycle.py && python3 tests/upgrade.py

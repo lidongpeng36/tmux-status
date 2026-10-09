@@ -24,4 +24,40 @@ if [ -n "$URLS" ] && [ "$(option @tmux-status-network on)" = on ]; then
   IFS='|' read -r -a urls <<< "$URLS"
   for url in "${urls[@]}"; do ARGS+=(--check-url "$url"); done
 fi
+STYLE_FILE="$(option @tmux-status-appearance-file '')"
+if [ -n "$STYLE_FILE" ]; then
+  STYLE_FILE="${STYLE_FILE/#\~/$HOME}"
+  ARGS+=(--appearance-file "$STYLE_FILE")
+fi
+ARGS+=(--appearance "$(option @tmux-status-appearance '{}')")
+for key in cpu-label mem-label separator labels; do
+  value="$(option "@tmux-status-$key" '')"
+  if [ -n "$value" ]; then ARGS+=("--$key" "$value"); fi
+ done
+"$BIN" --check-config "${ARGS[@]}"
+# Managed binary upgrades hand over to the new release without killing tmux or
+# signalling a PID file. Verify the currently reported process's full command,
+# both its cached binary prefix and this exact socket/server identity.
+owner="$(option @tmux-status-collector-pid '')"
+if [[ "$owner" =~ ^[1-9][0-9]*$ ]]; then
+  running="$(ps -o command= -p "$owner" 2>/dev/null || true)"
+  running="${running#"${running%%[![:space:]]*}"}"
+  case "$running" in
+    "$ROOT/bin/tmux-status-"*" --serve $SOCKET --server-pid $SERVER_PID "*)
+      case "$running" in
+        "$BIN "*) ;;
+        *)
+          # Re-read before signalling, in case an overlapping reload won.
+          if [ "$(ps -o command= -p "$owner" 2>/dev/null | sed 's/^[[:space:]]*//')" = "$running" ]; then
+            kill -TERM "$owner" 2>/dev/null || true
+            for ((waited=0; waited<100; waited++)); do
+              if ! kill -0 "$owner" 2>/dev/null; then break; fi
+              sleep 0.05
+            done
+          fi
+          ;;
+      esac
+      ;;
+  esac
+fi
 exec "$BIN" "${ARGS[@]}"

@@ -90,8 +90,18 @@ def main():
             assert first.option('status-right') == '#{@tmux-status-local}'
             rendered = first.command('display-message', '-p', '#{T:status-right}')
             assert '%#[default]' in rendered, rendered
-            assert 'CPU:' in first.option('@tmux-status-local')
-            assert 'CPU:' in first.option('@tmux-status-remote')
+            assert ' ' in first.option('@tmux-status-local')
+            assert '󰍛 ' in first.option('@tmux-status-remote')
+            # Partial appearance overrides apply without resetting the sampler.
+            first.command('set', '-g', '@tmux-status-cpu-label', 'C: ', ';',
+                          'set', '-g', '@tmux-status-appearance', '{"normal_color":"colour39","mem_template":"{label}{used}/{total}","separator":" | "}')
+            first.command('run-shell', PLUGIN)
+            first.wait(lambda: 'C: ' in first.option('@tmux-status-local'))
+            assert first.option('@tmux-status-collector-pid') == owner
+            assert 'colour39' in first.option('@tmux-status-local')
+            first.command('set', '-gu', '@tmux-status-cpu-label', ';', 'set', '-gu', '@tmux-status-appearance')
+            first.command('run-shell', PLUGIN)
+            first.wait(lambda: ' ' in first.option('@tmux-status-local'))
             # Reload changes configuration via IPC, preserving owner and baseline.
             first.command('set', '-g', '@tmux-status-network', 'on', ';',
                           'set', '-g', '@tmux-status-check-urls', 'http://127.0.0.1:1/', ';',

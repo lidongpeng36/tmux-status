@@ -110,22 +110,18 @@ fn aggregate_batteries(packs: &[(f64, f64, f64, BatteryState)]) -> Result<Option
     Ok(Some(Battery { percent, state }))
 }
 
-pub fn date() -> Option<String> {
+pub fn date(format: &str) -> Option<String> {
+    let format = std::ffi::CString::new(format).ok()?;
     // SAFETY: localtime_r initializes tm from a valid timestamp. strftime
-    // receives a bounded writable buffer and a static NUL-terminated format.
+    // receives a bounded writable buffer and a owned NUL-terminated format.
     unsafe {
         let now = libc::time(std::ptr::null_mut());
         let mut tm = std::mem::zeroed();
         if libc::localtime_r(&now, &mut tm).is_null() {
             return None;
         }
-        let mut buf = [0u8; 64];
-        let len = libc::strftime(
-            buf.as_mut_ptr().cast(),
-            buf.len(),
-            c"%b %d %H:%M".as_ptr(),
-            &tm,
-        );
+        let mut buf = [0u8; 256];
+        let len = libc::strftime(buf.as_mut_ptr().cast(), buf.len(), format.as_ptr(), &tm);
         (len > 0).then(|| String::from_utf8_lossy(&buf[..len]).into_owned())
     }
 }

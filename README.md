@@ -55,6 +55,69 @@ it preserves the process and CPU baseline. Keep prefix, zoom and key-table
 indicators as native tmux formats around `#{tmux_status}`. Colors and Nerd Font
 battery glyphs follow the project's compact default palette.
 
+## Appearance: defaults first, overrides only
+
+CPU and memory use Nerd Font icons **** and **󰍛** by default. No appearance
+settings are required. To keep text labels or replace individual labels:
+
+```tmux
+# Optional examples; omit all of these to use the defaults.
+set -g @tmux-status-labels 'text'       # CPU: / MEM:
+set -g @tmux-status-cpu-label ' '
+set -g @tmux-status-mem-label '󰍛 '
+set -g @tmux-status-separator ' | '
+```
+
+For more customization, supply a **partial JSON object**. Missing keys retain
+built-in defaults, and unknown keys or invalid thresholds are rejected.
+
+```tmux
+set -g @tmux-status-appearance '{"cpu_medium":40,"cpu_high":85,"normal_color":"colour39","mem_template":"{label}{value} {used}/{total}"}'
+```
+
+Large themes can live in an optional JSON file:
+
+```tmux
+set -g @tmux-status-appearance-file '~/.config/tmux-status/appearance.json'
+```
+
+The order is **built-in defaults → file → inline JSON → individual tmux label,
+separator and label-mode overrides**. Reload applies changes to the existing
+collector; files and tmux appearance options are read only at startup/reload,
+never once per status refresh. `--plain` keeps ASCII diagnostic labels.
+
+| JSON keys | Built-in defaults / meaning |
+| --- | --- |
+| `labels`, `cpu_label`, `mem_label` | `icons`, ` `, `󰍛 `; `text` uses CPU:/MEM: unless a label is explicitly customized |
+| `cpu_template` | `{label}{value}`; `value` is the colored percentage, `percent` is unstyled |
+| `mem_template` | `{label}{value} {used}`; also supports `{percent}`, `{free}`, `{total}` |
+| `cpu_precision`, `mem_precision`, `size_precision` | `1`, `0`, `1`; each 0..3 |
+| `size_unit` | `G`; `G`, `M`, `K` mean binary GiB/MiB/KiB with compact suffixes |
+| `cpu_medium`, `cpu_high` | `30`, `80` percent |
+| `mem_medium`, `mem_high` | `75`, `90` percent |
+| `normal_color`, `warning_color`, `critical_color`, `unknown_color` | `colour076`, `colour220`, `colour160`, `colour245` |
+| `date_format`, `date_color` | `%b %d %H:%M`, `colour134` |
+| `separator` | `  ` |
+| `local_segments` | `["cpu","memory","date","battery","network"]` |
+| `remote_segments` | `["cpu","memory","load","network"]` |
+| `battery_template` | `{icon} {percent}`; also supports `{state}` |
+| `battery_icons`, `battery_upper_bounds` | Eight Nerd Font charge icons, upper bounds `[12.5,25,37.5,50,62.5,75,87.5,100]`; arrays have matching lengths |
+| `charging_icon`, `full_icon`, `plugged_icon`, `battery_unknown_icon` | `󰂄`, `󰂅`, ``, `󰂃` |
+| `battery_low`, `battery_medium`, `charging_color` | `15`, `50`, `#3daee9` |
+| `online_icon`, `offline_icon`, `limited_icon`, `network_unknown_icon` | `●`, `●`, `●`, `○`; use theme state colors above |
+
+Remove/reorder segments to hide/reposition widgets. Colors accept tmux names,
+`colourN`, or hexadecimal values. Static tmux style markup is allowed in labels
+and templates; templates accept only the documented data placeholders. Use an
+empty label in JSON if no prefix is desired. Invalid new configuration leaves a
+healthy existing collector running. `tmux-status --check-config` validates a
+configuration without collecting metrics or probing the network.
+
+Managed binary upgrades verify the old process's cached binary path and exact
+server/socket identity before handing over. The tmux server and its panes stay
+alive; after upgrade, normal reloads reuse the new collector's PID. For custom
+`@tmux-status-bin` paths, the caller manages binary replacement.
+
 ## Network semantics
 
 The default targets, in order, are:
@@ -156,6 +219,7 @@ python3 tests/installer.py
 python3 tests/cold_install_lifecycle.py
 python3 tests/publisher_lifecycle.py
 python3 tests/tmux_lifecycle.py
+python3 tests/upgrade.py
 ```
 
 CI checks Linux and macOS. Release builds additionally test the shipped binary

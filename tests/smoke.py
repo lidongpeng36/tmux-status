@@ -44,6 +44,17 @@ class Smoke(unittest.TestCase):
                 process.kill()
                 process.wait()
 
+    def test_partial_style_defaults_text_mode_and_invalid_config(self):
+        output = subprocess.check_output([BIN, '--once', '--no-date', '--no-battery'], text=True, timeout=5)
+        self.assertIn(' ', output); self.assertIn('󰍛 ', output)
+        output = subprocess.check_output([BIN, '--once', '--labels', 'text', '--no-date', '--no-battery'], text=True, timeout=5)
+        self.assertIn('CPU:', output); self.assertIn('MEM:', output)
+        output = subprocess.check_output([BIN, '--once', '--cpu-label', 'C: ', '--no-date', '--no-battery'], text=True, timeout=5)
+        self.assertIn('C: ', output); self.assertIn('󰍛 ', output)
+        for style in ['{"cpu_high":101}', '{"cpu_labl":"typo"}', '{"mem_template":"{typo}"}']:
+            result = subprocess.run([BIN, '--check-config', '--appearance', style], capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 2)
+
     def test_invalid_intervals_and_hostname_probe_are_rejected(self):
         for args in [["--interval", "0"], ["--probe", "example.com:443"], ["--probe-timeout-ms", "0"]]:
             result = subprocess.run([BIN, *args], capture_output=True, timeout=5)

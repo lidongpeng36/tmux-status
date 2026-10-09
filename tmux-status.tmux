@@ -14,13 +14,13 @@ for option in status-left status-right; do
   tmux set-option -gq "$option" "$value"
 done
 if [ -z "$(tmux show-option -gqv @tmux-status-local)" ]; then
-  tmux set -gq @tmux-status-local 'CPU:--  MEM:--' \; set -gq @tmux-status-remote 'CPU:--  MEM:--'
+  tmux set -gq @tmux-status-local ' --  󰍛 --' \; set -gq @tmux-status-remote ' --  󰍛 --'
 fi
 tmux set -gq @tmux-status-version "$(cat "$ROOT/VERSION")"
 # Shell escaping is confined to the trusted entry-point path; tmux expands the
 # socket/server formats at job creation. The Rust owner deduplicates reloads.
 printf -v start '%q' "$ROOT/scripts/start.sh"
-command="$start \"#{socket_path}\" \"#{pid}\""
+command="exec $start \"#{socket_path}\" \"#{pid}\""
 TAG=tmux-status-start-hook
 # Keep other plugins' client-attached hooks. Reattaching also repairs a crashed
 # collector; a healthy owner only receives the configuration and keeps its PID.

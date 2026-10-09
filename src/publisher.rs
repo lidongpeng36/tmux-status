@@ -113,6 +113,7 @@ impl Publisher {
             if let Ok(args) = serde_json::from_slice::<Args>(&buffer[..size])
                 && args.serve.as_ref() == Some(&self.socket)
                 && args.server_pid == Some(self.server_pid)
+                && args.appearance.validate().is_ok()
             {
                 latest = Some(args);
             }
@@ -121,16 +122,8 @@ impl Publisher {
     }
 
     pub fn publish(&self, snapshot: &Snapshot, args: &Args) -> io::Result<bool> {
-        let mut local_args = args.clone();
-        local_args.no_date = false;
-        local_args.no_battery = false;
-        local_args.load = false;
-        let mut remote_args = args.clone();
-        remote_args.no_date = true;
-        remote_args.no_battery = true;
-        remote_args.load = true;
-        let local = render::render(snapshot, &local_args);
-        let remote = render::render(snapshot, &remote_args);
+        let local = render::profile(snapshot, args, false);
+        let remote = render::profile(snapshot, args, true);
         let json = serde_json::to_string(snapshot)?;
         // One child per published snapshot, no shell parsing and no attach client.
         // This connection never keeps a session/server alive.
@@ -157,6 +150,11 @@ impl Publisher {
                 "-gq",
                 "@tmux-status-collector-pid",
                 &std::process::id().to_string(),
+                ";",
+                "set-option",
+                "-gq",
+                "@tmux-status-collector-version",
+                env!("CARGO_PKG_VERSION"),
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

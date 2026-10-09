@@ -1,6 +1,6 @@
 [package]
 name = "tmux-status"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Native, streaming system metrics for tmux on Linux and macOS"
