@@ -5,8 +5,10 @@ for option in status-left status-right; do
   value="$(tmux show-option -gqv "$option")"
   local_placeholder='#{tmux_status}'
   remote_placeholder='#{tmux_status_remote}'
-  local_format='#{E:@tmux-status-local}'
-  remote_format='#{E:@tmux-status-remote}'
+  # These values already contain final text/styles. Recursive E expansion
+  # inherits status strftime processing and consumes a literal % before #.
+  local_format='#{@tmux-status-local}'
+  remote_format='#{@tmux-status-remote}'
   value="${value//$local_placeholder/$local_format}"
   value="${value//$remote_placeholder/$remote_format}"
   tmux set-option -gq "$option" "$value"
