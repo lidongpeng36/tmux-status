@@ -58,16 +58,17 @@ battery glyphs follow the project's compact default palette.
 ## Appearance: defaults first, overrides only
 
 CPU and memory use Nerd Font icons **** and **** by default. No appearance
-settings are required. Icons use blue/purple accents with two trailing spaces.
-Percentages and memory sizes are right-aligned in minimum-width fields so
-digit transitions do not shift the right-aligned status bar. `--plain` remains
-unpadded. To keep text labels or replace individual labels:
+settings are required. Values precede their icons: `9.9% ` and `69% 33.2G `.
+Icons use blue/purple accents; numbers are compact with no width padding.
+In a right-aligned bar, CPU digit transitions leave its trailing icon in place
+while the following segments keep their width. Text mode and `--plain` keep
+the familiar `CPU:` / `MEM:` prefixes. To keep text labels or replace individual labels:
 
 ```tmux
 # Optional examples; omit all of these to use the defaults.
 set -g @tmux-status-labels 'text'       # CPU: / MEM:
-set -g @tmux-status-cpu-label '  '
-set -g @tmux-status-mem-label '  '
+set -g @tmux-status-cpu-label ' '
+set -g @tmux-status-mem-label ' '
 set -g @tmux-status-separator ' | '
 ```
 
@@ -91,11 +92,11 @@ never once per status refresh. `--plain` keeps ASCII diagnostic labels.
 
 | JSON keys | Built-in defaults / meaning |
 | --- | --- |
-| `labels`, `cpu_label`, `mem_label` | `icons`, `  `, `  `; `text` uses CPU:/MEM: unless a label is explicitly customized |
-| `cpu_template` | `{label}{value}`; `value` is the colored percentage, `percent` is unstyled |
-| `mem_template` | `{label}{value} {used}`; also supports `{percent}`, `{free}`, `{total}` |
+| `labels`, `cpu_label`, `mem_label` | `icons`, ` `, ` `; `text` uses CPU:/MEM: unless a label is explicitly customized |
+| `cpu_template` | `{value} {label}`; `value` is the colored percentage, `percent` is unstyled |
+| `mem_template` | `{value} {used} {label}`; also supports `{percent}`, `{free}`, `{total}` |
 | `cpu_label_color`, `mem_label_color` | `#61afef`, `#c678dd`; independent icon/label colors |
-| `cpu_width`, `mem_width`, `size_width` | `6`, `4`, `6` minimum columns, right-aligned; `0` disables padding, maximum `64`; increase widths for larger sizes or extra precision |
+| `cpu_width`, `mem_width`, `size_width` | `0`, `0`, `0`; optional minimum columns, right-aligned; `0` disables padding, maximum `64`; increase widths for larger sizes or extra precision |
 | `cpu_precision`, `mem_precision`, `size_precision` | `1`, `0`, `1`; each 0..3 |
 | `size_unit` | `G`; `G`, `M`, `K` mean binary GiB/MiB/KiB with compact suffixes |
 | `cpu_medium`, `cpu_high` | `30`, `80` percent |

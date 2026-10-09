@@ -60,15 +60,15 @@ impl Default for Appearance {
     fn default() -> Self {
         Self {
             labels: Labels::Icons,
-            cpu_label: "  ".into(),
-            mem_label: "  ".into(),
+            cpu_label: " ".into(),
+            mem_label: " ".into(),
             cpu_label_color: "#61afef".into(),
             mem_label_color: "#c678dd".into(),
-            cpu_width: 6,
-            mem_width: 4,
-            size_width: 6,
-            cpu_template: "{label}{value}".into(),
-            mem_template: "{label}{value} {used}".into(),
+            cpu_width: 0,
+            mem_width: 0,
+            size_width: 0,
+            cpu_template: "{value} {label}".into(),
+            mem_template: "{value} {used} {label}".into(),
             cpu_precision: 1,
             mem_precision: 0,
             size_precision: 1,
@@ -292,7 +292,7 @@ mod tests {
         let style =
             Appearance::load(None, r##"{"cpu_label":"C: ","normal_color":"#abcdef"}"##).unwrap();
         assert_eq!(style.cpu_label, "C: ");
-        assert_eq!(style.mem_label, "  ");
+        assert_eq!(style.mem_label, " ");
         assert_eq!(style.cpu_high, 80.0);
         assert!(Appearance::load(None, r#"{"cpu_labl":"oops"}"#).is_err());
         assert!(Appearance::load(None, r#"{"cpu_medium":90,"cpu_high":80}"#).is_err());

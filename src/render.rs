@@ -42,7 +42,7 @@ fn segment(name: &str, snapshot: &Snapshot, args: &Args) -> Option<String> {
     let text_labels = a.labels == Labels::Text;
     match name {
         "cpu" => {
-            let label = if args.plain || (text_labels && a.cpu_label == "  ") {
+            let label = if args.plain || (text_labels && a.cpu_label == " ") {
                 "CPU:"
             } else {
                 &a.cpu_label
@@ -55,8 +55,13 @@ fn segment(name: &str, snapshot: &Snapshot, args: &Args) -> Option<String> {
                 .cpu_percent
                 .map(|n| a.color(n, a.cpu_medium, a.cpu_high))
                 .unwrap_or(&a.unknown_color);
+            let template = if (args.plain || text_labels) && a.cpu_template == "{value} {label}" {
+                "{label}{value}"
+            } else {
+                &a.cpu_template
+            };
             Some(interpolate(
-                &a.cpu_template,
+                template,
                 &[
                     ("label", styled(label, &a.cpu_label_color, args.plain)),
                     (
@@ -72,7 +77,7 @@ fn segment(name: &str, snapshot: &Snapshot, args: &Args) -> Option<String> {
             ))
         }
         "memory" => {
-            let label = if args.plain || (text_labels && a.mem_label == "  ") {
+            let label = if args.plain || (text_labels && a.mem_label == " ") {
                 "MEM:"
             } else {
                 &a.mem_label
@@ -84,9 +89,15 @@ fn segment(name: &str, snapshot: &Snapshot, args: &Args) -> Option<String> {
             let color = values
                 .map(|(_, p)| a.color(p, a.mem_medium, a.mem_high))
                 .unwrap_or(&a.unknown_color);
+            let template =
+                if (args.plain || text_labels) && a.mem_template == "{value} {used} {label}" {
+                    "{label}{value} {used}"
+                } else {
+                    &a.mem_template
+                };
             if let Some((m, _)) = values {
                 Some(interpolate(
-                    &a.mem_template,
+                    template,
                     &[
                         ("label", styled(label, &a.mem_label_color, args.plain)),
                         (
@@ -104,11 +115,29 @@ fn segment(name: &str, snapshot: &Snapshot, args: &Args) -> Option<String> {
                     ],
                 ))
             } else {
-                Some(format!(
-                    "{}{}",
-                    styled(label, &a.mem_label_color, args.plain),
-                    padded("--", a.mem_width, args.plain)
-                ))
+                let label = styled(label, &a.mem_label_color, args.plain);
+                let value = styled(
+                    &padded("--", a.mem_width, args.plain),
+                    &a.unknown_color,
+                    args.plain,
+                );
+                if args.plain || text_labels {
+                    Some(format!("{label}{value}"))
+                } else if template == "{value} {used} {label}" {
+                    Some(format!("{value} {label}"))
+                } else {
+                    Some(interpolate(
+                        template,
+                        &[
+                            ("label", label),
+                            ("value", value),
+                            ("percent", "--".into()),
+                            ("used", "--".into()),
+                            ("free", "--".into()),
+                            ("total", "--".into()),
+                        ],
+                    ))
+                }
             }
         }
         "load" => Some(
@@ -249,6 +278,9 @@ mod tests {
     fn percentage_digit_transitions_keep_icon_columns() {
         let mut args = Args::parse_from(["tmux-status", "--no-date"]);
         args.appearance.local_segments = vec!["cpu".into(), "memory".into()];
+        args.appearance.cpu_width = 6;
+        args.appearance.mem_width = 4;
+        args.appearance.size_width = 6;
         let mut s = snapshot();
         s.memory = Some(Memory {
             used_bytes: 9 * 1073741824,
@@ -286,9 +318,16 @@ mod tests {
             }
         }
         s.cpu_percent = Some(9.9);
-        assert!(strip(&render(&s, &args)).starts_with("    9.9%"));
+        assert!(strip(&render(&s, &args)).starts_with("  9.9%  "));
         args.appearance.cpu_width = 0;
-        assert!(strip(&render(&s, &args)).starts_with("  9.9%"));
+        assert!(strip(&render(&s, &args)).starts_with("9.9%  "));
+        let mut right_offset = None;
+        for cpu in [9.9, 10.0, 100.0] {
+            s.cpu_percent = Some(cpu);
+            let text = strip(&render(&s, &args));
+            let offset = text.chars().count() - text.chars().position(|c| c == '').unwrap();
+            assert_eq!(*right_offset.get_or_insert(offset), offset);
+        }
     }
 
     #[test]
@@ -303,13 +342,16 @@ mod tests {
         let output = render(&s, &args);
         assert!(output.contains(" "));
         assert!(output.contains(" "));
-        assert!(output.contains("12.5%#[default]"));
+        assert!(output.starts_with("#[fg=colour076]12.5%#[default] #[fg=#61afef] "));
+        assert!(output.contains("50%#[default] 1.0G #[fg=#c678dd] "));
+        let plain = Args::parse_from(["tmux-status", "--plain", "--no-date"]);
+        assert_eq!(render(&s, &plain), "CPU:12.5% | MEM:50% 1.0G");
         args.appearance=crate::appearance::Appearance::load(None,r#"{"cpu_label":"C: ","mem_template":"{label}{used}/{total}","separator":" / ","local_segments":["memory","cpu"]}"#).unwrap();
         let output = render(&s, &args);
-        assert!(output.contains("  #[default]  1.0G/  2.0G / #[fg=#61afef]C: "));
+        assert!(output.contains(" #[default]1.0G/2.0G / "));
         args.appearance.labels = Labels::Text;
         assert!(render(&s, &args).contains("C: "));
-        args.appearance.cpu_label = "  ".into();
+        args.appearance.cpu_label = " ".into();
         assert!(render(&s, &args).contains("CPU:"));
     }
 }
