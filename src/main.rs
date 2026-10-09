@@ -1,6 +1,7 @@
 mod metrics;
 mod network;
 mod platform;
+mod publisher;
 mod render;
 
 use clap::Parser;
@@ -8,10 +9,20 @@ use metrics::{Reachability, Snapshot};
 use std::{
     io::{self, Write},
     net::SocketAddr,
+    path::PathBuf,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
-#[derive(Debug, Parser)]
+static STOP: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+fn stopped() -> bool {
+    STOP.get().is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
+
+#[derive(Clone, Debug, Parser, serde::Serialize, serde::Deserialize)]
 #[command(
     version,
     about = "Native system metrics. Streams one line per interval; tmux displays the latest line."
@@ -43,6 +54,25 @@ pub struct Args {
     /// No DNS, HTTP request, TLS handshake, or default network traffic.
     #[arg(long)]
     probe: Option<SocketAddr>,
+    /// Enable HTTP connectivity checks (automatically enabled by the TPM plugin).
+    #[arg(long, conflicts_with = "probe")]
+    network: bool,
+    /// HTTP(S) connectivity-check URL expected to return 204. Repeat for fallback targets.
+    #[arg(long, requires = "network", value_parser = network::valid_url)]
+    check_url: Vec<String>,
+    /// Bypass environment/macOS system proxies for HTTP checks.
+    #[arg(long)]
+    network_direct: bool,
+    /// Whole HTTP request timeout, milliseconds (includes DNS/connect/TLS/headers).
+    #[arg(long, default_value_t = 2000, value_parser = clap::value_parser!(u64).range(1..=10000))]
+    network_timeout_ms: u64,
+    /// Publish shared metrics into this tmux server instead of streaming stdout.
+    #[arg(long, requires = "server_pid", conflicts_with_all = ["once", "json", "plain"])]
+    serve: Option<PathBuf>,
+    #[arg(long, requires = "serve", value_parser = clap::value_parser!(u32).range(1..))]
+    server_pid: Option<u32>,
+    #[arg(long, default_value = "tmux")]
+    tmux_bin: PathBuf,
     /// Successful probe interval, seconds. Failures back off up to 10x.
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=3600))]
     probe_interval: u64,
@@ -51,12 +81,36 @@ pub struct Args {
     probe_timeout_ms: u64,
 }
 
+impl Args {
+    fn network_config(&self) -> network::Config {
+        network::Config {
+            tcp: self.probe,
+            http: self.network,
+            urls: if self.check_url.is_empty() {
+                network::DEFAULT_URLS.iter().map(|s| (*s).into()).collect()
+            } else {
+                self.check_url.clone()
+            },
+            direct: self.network_direct,
+            timeout_ms: if self.probe.is_some() {
+                self.probe_timeout_ms
+            } else {
+                self.network_timeout_ms
+            },
+            interval: self.probe_interval,
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn wait_for_next_sample(deadline: Instant) -> io::Result<bool> {
     // Poll only for pipe closure/errors, not POLLOUT (which is always ready).
     // This lets tmux own the lifecycle even when our next write is minutes away.
     loop {
         let now = Instant::now();
+        if stopped() {
+            return Ok(false);
+        }
         if now >= deadline {
             return Ok(true);
         }
@@ -111,6 +165,9 @@ fn wait_for_next_sample(deadline: Instant) -> io::Result<bool> {
         .map_err(io::Error::from)?;
     loop {
         let now = Instant::now();
+        if stopped() {
+            return Ok(false);
+        }
         if now >= deadline {
             return Ok(true);
         }
@@ -130,14 +187,19 @@ fn wait_for_next_sample(deadline: Instant) -> io::Result<bool> {
     }
 }
 
-fn run(args: Args) -> io::Result<()> {
-    let timeout = Duration::from_millis(args.probe_timeout_ms);
-    let receiver = if args.once {
+fn run(mut args: Args) -> io::Result<()> {
+    let publisher = if args.serve.is_some() {
+        match publisher::Publisher::enter(&args)? {
+            Some(owner) => Some(owner),
+            None => return Ok(()),
+        }
+    } else {
+        None
+    };
+    let worker = if args.once {
         None
     } else {
-        args.probe.map(|target| {
-            network::worker(target, timeout, Duration::from_secs(args.probe_interval))
-        })
+        Some(network::worker(args.network_config()))
     };
     let mut network_update: Option<network::Update> = None;
     let mut collector = platform::Collector::new();
@@ -146,10 +208,23 @@ fn run(args: Args) -> io::Result<()> {
     let mut next_battery = Instant::now();
     let stdout = io::stdout();
     let mut output = stdout.lock();
+    let mut first = true;
     loop {
         let started = Instant::now();
-        let (cpu_percent, memory, load_per_core) = collector.sample(args.load);
-        if !args.no_battery && started >= next_battery {
+        if let Some(owner) = &publisher
+            && let Some(updated) = owner.configuration()
+        {
+            if updated.network_config() != args.network_config() {
+                network_update = None;
+                if let Some(worker) = &worker {
+                    worker.configure(updated.network_config());
+                }
+            }
+            args = updated;
+        }
+        let (cpu_percent, memory, load_per_core) =
+            collector.sample(args.load || publisher.is_some());
+        if (!args.no_battery || publisher.is_some()) && started >= next_battery {
             match platform::battery() {
                 Ok(value) => {
                     battery = value;
@@ -162,14 +237,16 @@ fn run(args: Args) -> io::Result<()> {
             }
             next_battery = started + Duration::from_secs(args.battery_interval);
         }
-        if let Some(rx) = &receiver {
-            for update in rx.try_iter() {
-                network_update = Some(update);
+        if let Some(worker) = &worker {
+            for update in worker.updates.try_iter() {
+                if update.config == args.network_config() {
+                    network_update = Some(update);
+                }
             }
         }
-        let reachability = args.probe.map(|target| {
+        let reachability = (args.probe.is_some() || args.network).then(|| {
             if args.once {
-                network::probe(target, timeout)
+                network::once(&args.network_config())
             } else if let Some(update) = &network_update {
                 if started < update.expires {
                     update.state
@@ -188,20 +265,45 @@ fn run(args: Args) -> io::Result<()> {
             battery_error,
             reachability,
         };
-        let line = if args.json {
-            serde_json::to_string(&snapshot)?
+        if let Some(owner) = &publisher {
+            if !owner.publish(&snapshot, &args)? {
+                return Ok(());
+            }
         } else {
-            render::render(&snapshot, &args)
+            let line = if args.json {
+                serde_json::to_string(&snapshot)?
+            } else {
+                render::render(&snapshot, &args)
+            };
+            writeln!(output, "{line}")?;
+            output.flush()?;
+        }
+        // Establish a real CPU delta promptly instead of waiting the full 5s.
+        let delay = if first {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_secs(args.interval)
         };
-        writeln!(output, "{line}")?;
-        output.flush()?;
-        if args.once || !wait_for_next_sample(started + Duration::from_secs(args.interval))? {
+        first = false;
+        if args.once || !wait_for_next_sample(started + delay)? {
             return Ok(());
         }
     }
 }
 
 fn main() {
+    let stop = Arc::new(AtomicBool::new(false));
+    for signal in [
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGHUP,
+    ] {
+        if let Err(error) = signal_hook::flag::register(signal, stop.clone()) {
+            eprintln!("tmux-status: signal handler: {error}");
+            std::process::exit(1);
+        }
+    }
+    let _ = STOP.set(stop);
     if let Err(e) = run(Args::parse())
         && e.kind() != io::ErrorKind::BrokenPipe
     {

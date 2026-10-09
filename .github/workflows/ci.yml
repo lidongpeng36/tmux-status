@@ -21,3 +21,8 @@ jobs:
       - run: cargo test --locked
       - run: cargo build --locked --release
       - run: python3 tests/smoke.py
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - if: runner.os == 'macOS'
+        run: brew install tmux
+      - run: python3 tests/installer.py && python3 tests/cold_install_lifecycle.py && python3 tests/publisher_lifecycle.py && python3 tests/tmux_lifecycle.py

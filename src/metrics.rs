@@ -35,6 +35,7 @@ pub enum Reachability {
     Reachable,
     Unreachable,
     Unknown,
+    Limited,
 }
 
 #[derive(Debug, Serialize)]

@@ -83,9 +83,24 @@ pub fn render(snapshot: &Snapshot, args: &Args) -> String {
         let (text, fg) = match state {
             Reachability::Reachable => ("TCP:up", "colour076"),
             Reachability::Unreachable => ("TCP:down", "colour160"),
-            Reachability::Unknown => ("TCP:--", "colour220"),
+            Reachability::Unknown => ("TCP:--", "colour245"),
+            Reachability::Limited => ("NET:limited", "colour220"),
         };
-        parts.push(styled(if args.plain { text } else { "●" }, fg, args.plain));
+        let text = if args.network {
+            text.replace("TCP:", "NET:")
+        } else {
+            text.into()
+        };
+        let icon = if state == Reachability::Unknown {
+            "○"
+        } else {
+            "●"
+        };
+        parts.push(styled(
+            if args.plain { &text } else { icon },
+            fg,
+            args.plain,
+        ));
     }
     parts.join(if args.plain { " | " } else { "  " })
 }
