@@ -51,7 +51,7 @@ def main():
             assert alive(unrelated.pid),'upgrade signalled an unrelated process'
             for _ in range(3):tmux('run-shell',str(plugin/'tmux-status.tmux'))
             time.sleep(.7);assert option('@tmux-status-collector-pid')==replacement
-            assert ' ' in option('@tmux-status-local')
+            assert ' ' in option('@tmux-status-local')
             print(json.dumps({'invalid_configuration_kept_old_owner':True,'managed_upgrade':True,'unrelated_process_preserved':True,'reload_reuses_new_owner':True}))
         finally:
             try:tmux('kill-server')

@@ -14,7 +14,7 @@ for option in status-left status-right; do
   tmux set-option -gq "$option" "$value"
 done
 if [ -z "$(tmux show-option -gqv @tmux-status-local)" ]; then
-  tmux set -gq @tmux-status-local ' --  󰍛 --' \; set -gq @tmux-status-remote ' --  󰍛 --'
+  tmux set -gq @tmux-status-local '#[fg=#61afef]  #[default]    --  #[fg=#c678dd]  #[default]  --' \; set -gq @tmux-status-remote '#[fg=#61afef]  #[default]    --  #[fg=#c678dd]  #[default]  --'
 fi
 tmux set -gq @tmux-status-version "$(cat "$ROOT/VERSION")"
 # Shell escaping is confined to the trusted entry-point path; tmux expands the

@@ -16,6 +16,11 @@ pub struct Appearance {
     pub labels: Labels,
     pub cpu_label: String,
     pub mem_label: String,
+    pub cpu_label_color: String,
+    pub mem_label_color: String,
+    pub cpu_width: usize,
+    pub mem_width: usize,
+    pub size_width: usize,
     pub cpu_template: String,
     pub mem_template: String,
     pub cpu_precision: usize,
@@ -55,8 +60,13 @@ impl Default for Appearance {
     fn default() -> Self {
         Self {
             labels: Labels::Icons,
-            cpu_label: " ".into(),
-            mem_label: "󰍛 ".into(),
+            cpu_label: "  ".into(),
+            mem_label: "  ".into(),
+            cpu_label_color: "#61afef".into(),
+            mem_label_color: "#c678dd".into(),
+            cpu_width: 6,
+            mem_width: 4,
+            size_width: 6,
             cpu_template: "{label}{value}".into(),
             mem_template: "{label}{value} {used}".into(),
             cpu_precision: 1,
@@ -143,6 +153,12 @@ impl Appearance {
         if self.cpu_precision > 3 || self.mem_precision > 3 || self.size_precision > 3 {
             return Err("precision must be 0..3".into());
         }
+        if [self.cpu_width, self.mem_width, self.size_width]
+            .iter()
+            .any(|w| *w > 64)
+        {
+            return Err("numeric widths must be 0..64".into());
+        }
         if !["G", "M", "K"].contains(&self.size_unit.as_str()) {
             return Err("size_unit must be G, M or K (binary units)".into());
         }
@@ -190,6 +206,8 @@ impl Appearance {
             &self.critical_color,
             &self.unknown_color,
             &self.date_color,
+            &self.cpu_label_color,
+            &self.mem_label_color,
             &self.charging_color,
         ] {
             if color.is_empty() || !color.chars().all(|c| c.is_ascii_alphanumeric() || c == '#') {
@@ -274,7 +292,7 @@ mod tests {
         let style =
             Appearance::load(None, r##"{"cpu_label":"C: ","normal_color":"#abcdef"}"##).unwrap();
         assert_eq!(style.cpu_label, "C: ");
-        assert_eq!(style.mem_label, "󰍛 ");
+        assert_eq!(style.mem_label, "  ");
         assert_eq!(style.cpu_high, 80.0);
         assert!(Appearance::load(None, r#"{"cpu_labl":"oops"}"#).is_err());
         assert!(Appearance::load(None, r#"{"cpu_medium":90,"cpu_high":80}"#).is_err());

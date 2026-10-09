@@ -46,11 +46,11 @@ class Smoke(unittest.TestCase):
 
     def test_partial_style_defaults_text_mode_and_invalid_config(self):
         output = subprocess.check_output([BIN, '--once', '--no-date', '--no-battery'], text=True, timeout=5)
-        self.assertIn(' ', output); self.assertIn('󰍛 ', output)
+        self.assertIn(' ', output); self.assertIn(' ', output)
         output = subprocess.check_output([BIN, '--once', '--labels', 'text', '--no-date', '--no-battery'], text=True, timeout=5)
         self.assertIn('CPU:', output); self.assertIn('MEM:', output)
         output = subprocess.check_output([BIN, '--once', '--cpu-label', 'C: ', '--no-date', '--no-battery'], text=True, timeout=5)
-        self.assertIn('C: ', output); self.assertIn('󰍛 ', output)
+        self.assertIn('C: ', output); self.assertIn(' ', output)
         for style in ['{"cpu_high":101}', '{"cpu_labl":"typo"}', '{"mem_template":"{typo}"}']:
             result = subprocess.run([BIN, '--check-config', '--appearance', style], capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 2)
