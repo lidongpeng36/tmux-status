@@ -181,7 +181,7 @@ running processes. Reload or client attach repairs a crashed collector.
 | clap / serde / serde_json | CLI and optional JSON Lines | MIT / Apache-2.0 |
 
 - CPU is global utilization since the previous sample. The initial snapshot is
-  `CPU:--` / JSON `null`, not a misleading zero.
+  an icon with `--` (`CPU:--` in text/plain mode) / JSON `null`, not a misleading zero.
 - Linux used memory is total minus `MemAvailable`. macOS used memory includes
   non-purgeable internal pages, wired pages and physical compressor pages;
   reclaimable file cache is excluded. Displayed `G` values are GiB.

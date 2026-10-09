@@ -94,7 +94,7 @@ def main():
             assert '󰍛 ' in first.option('@tmux-status-remote')
             # Partial appearance overrides apply without resetting the sampler.
             first.command('set', '-g', '@tmux-status-cpu-label', 'C: ', ';',
-                          'set', '-g', '@tmux-status-appearance', '{"normal_color":"colour39","mem_template":"{label}{used}/{total}","separator":" | "}')
+                          'set', '-g', '@tmux-status-appearance', '{"normal_color":"colour39","warning_color":"colour39","critical_color":"colour39","mem_template":"{label}{used}/{total}","separator":" | "}')
             first.command('run-shell', PLUGIN)
             first.wait(lambda: 'C: ' in first.option('@tmux-status-local'))
             assert first.option('@tmux-status-collector-pid') == owner
