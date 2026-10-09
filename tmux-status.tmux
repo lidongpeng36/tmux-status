@@ -3,8 +3,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 for option in status-left status-right; do
   value="$(tmux show-option -gqv "$option")"
-  value="${value//'#{tmux_status}'/'#{E:@tmux-status-local}'}"
-  value="${value//'#{tmux_status_remote}'/'#{E:@tmux-status-remote}'}"
+  local_placeholder='#{tmux_status}'
+  remote_placeholder='#{tmux_status_remote}'
+  local_format='#{E:@tmux-status-local}'
+  remote_format='#{E:@tmux-status-remote}'
+  value="${value//$local_placeholder/$local_format}"
+  value="${value//$remote_placeholder/$remote_format}"
   tmux set-option -gq "$option" "$value"
 done
 if [ -z "$(tmux show-option -gqv @tmux-status-local)" ]; then

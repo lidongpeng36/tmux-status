@@ -87,6 +87,7 @@ def main():
             assert hooks.count('tmux-status-start-hook') == 1, hooks
             # Two sessions/clients still consume the same native snapshot.
             assert '#(' not in first.option('status-right')
+            assert first.option('status-right') == '#{E:@tmux-status-local}'
             assert 'CPU:' in first.option('@tmux-status-local')
             assert 'CPU:' in first.option('@tmux-status-remote')
             # Reload changes configuration via IPC, preserving owner and baseline.
