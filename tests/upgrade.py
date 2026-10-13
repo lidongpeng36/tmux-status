@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -22,7 +23,7 @@ def main():
         shutil.copy2(OLD,old);shutil.copy2(BIN,new)
         socket=str(directory/'socket');config=directory/'tmux.conf';config.write_text('set -g status-interval 1\n')
         def tmux(*args):return subprocess.check_output(['tmux','-S',socket,*args],text=True,stderr=subprocess.STDOUT,timeout=5).strip()
-        def option(name):return tmux('show-option','-gqv',name)
+        def option(name):return tmux('display','-p','#{'+('TMUX_STATUS_'+name[len('@tmux-status-'):].upper().replace('-','_') if name in ['@tmux-status-local', '@tmux-status-remote', '@tmux-status-json', '@tmux-status-collector-pid', '@tmux-status-collector-version', '@tmux-status-version'] else name)+'}') or tmux('show-option','-gqv',name)
         def alive(pid):
             try:os.kill(int(pid),0);return True
             except ProcessLookupError:return False
@@ -39,6 +40,7 @@ def main():
             tmux('run-shell','-b','exec "'+str(old)+'" --serve "'+socket+'" --server-pid '+server+' --interval 1')
             wait(lambda:bool(option('@tmux-status-collector-pid')))
             owner=option('@tmux-status-collector-pid')
+            os.kill(int(owner), signal.SIGSTOP)
             tmux('set','-g','@tmux-status-bin',str(new),';','set','-g','@tmux-status-network','off',
                  ';','set','-g','@tmux-status-appearance','{"typo":1}')
             tmux('run-shell',str(plugin/'tmux-status.tmux'));time.sleep(.7)
@@ -52,7 +54,7 @@ def main():
             for _ in range(3):tmux('run-shell',str(plugin/'tmux-status.tmux'))
             time.sleep(.7);assert option('@tmux-status-collector-pid')==replacement
             assert ' ' in option('@tmux-status-local')
-            print(json.dumps({'invalid_configuration_kept_old_owner':True,'managed_upgrade':True,'unrelated_process_preserved':True,'reload_reuses_new_owner':True}))
+            print(json.dumps({'invalid_configuration_kept_old_owner':True,'managed_upgrade':True,'stopped_owner_handoff':True,'unrelated_process_preserved':True,'reload_reuses_new_owner':True}))
         finally:
             try:tmux('kill-server')
             except subprocess.CalledProcessError:pass

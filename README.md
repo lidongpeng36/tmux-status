@@ -163,11 +163,25 @@ lock file and OS file lock elect one owner **per server PID**. A competing start
 sends configuration to the owner and exits; sessions, clients and reloads do not
 create additional metric collectors. Different tmux servers remain isolated.
 
-The owner publishes `@tmux-status-local`, `@tmux-status-remote`,
-`@tmux-status-json` and `@tmux-status-collector-pid`. Status rendering reads native
-variables, so clients do not fork collectors. One short tmux CLI invocation per
-publication updates shared options; the collector never attaches a control-mode
-client that would keep the server alive.
+The owner publishes hidden global environment values `TMUX_STATUS_LOCAL`,
+`TMUX_STATUS_REMOTE`, `TMUX_STATUS_JSON`, `TMUX_STATUS_COLLECTOR_PID`, and
+`TMUX_STATUS_COLLECTOR_VERSION`. Status rendering uses non-recursive formats
+`#{TMUX_STATUS_LOCAL}` and `#{TMUX_STATUS_REMOTE}`. Hidden values are not exported
+to new panes or shell jobs. User configuration remains in `@tmux-status-*` options.
+
+Each sample uses short tmux CLI calls to publish one batch, enumerate clients,
+and refresh only their status lines (`refresh-client -S -t ...`). This avoids
+`set-option`'s full client redraw, which can erase terminal mouse selections even
+when the application is idle. Every attached client is refreshed, across sessions.
+No collector is started per client and no control client keeps the server alive.
+
+Inspect runtime data with `tmux show-environment -gh` or, for example,
+`tmux display-message -p '#{TMUX_STATUS_JSON}'`. The old `@tmux-status-local`,
+`@tmux-status-remote`, JSON and collector metadata options are no longer updated.
+Reload migrates already-expanded old status formats and uses the legacy owner PID
+for managed binary handoff. Custom binary overrides must point at the new build.
+Do not mix the new entry point with an old collector binary. Release deployment
+must ship the entry point, launcher and matching binary together.
 
 The first snapshot is immediate; a second CPU sample after 250 ms establishes
 an interval delta. Pipe-close notification and handled termination signals stop
@@ -223,6 +237,7 @@ cargo build --release --locked
 python3 tests/smoke.py
 python3 tests/installer.py
 python3 tests/cold_install_lifecycle.py
+python3 tests/redraw.py
 python3 tests/publisher_lifecycle.py
 python3 tests/tmux_lifecycle.py
 python3 tests/upgrade.py

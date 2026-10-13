@@ -8,7 +8,7 @@ option() { local value; value="$("$TMUX_BIN" -S "$SOCKET" show-option -gqv "$1")
 BIN="$(option @tmux-status-bin '')"
 if [ -z "$BIN" ]; then
   if ! BIN="$(TMUX_STATUS_SERVER_PID="$SERVER_PID" "$ROOT/scripts/install.sh")"; then
-    "$TMUX_BIN" -S "$SOCKET" set -gq @tmux-status-local 'STATUS:unavailable' \; set -gq @tmux-status-remote 'STATUS:unavailable' || true
+    "$TMUX_BIN" -S "$SOCKET" set-environment -gh TMUX_STATUS_LOCAL 'STATUS:unavailable' \; set-environment -gh TMUX_STATUS_REMOTE 'STATUS:unavailable' || true
     exit 1
   fi
 fi
@@ -38,7 +38,9 @@ for key in cpu-label mem-label separator labels; do
 # Managed binary upgrades hand over to the new release without killing tmux or
 # signalling a PID file. Verify the currently reported process's full command,
 # both its cached binary prefix and this exact socket/server identity.
-owner="$(option @tmux-status-collector-pid '')"
+owner="$("$TMUX_BIN" -S "$SOCKET" display-message -p '#{TMUX_STATUS_COLLECTOR_PID}')"
+# Legacy installed collectors still publish the old option during handoff.
+if [ -z "$owner" ]; then owner="$(option @tmux-status-collector-pid '')"; fi
 if [[ "$owner" =~ ^[1-9][0-9]*$ ]]; then
   running="$(ps -o command= -p "$owner" 2>/dev/null || true)"
   running="${running#"${running%%[![:space:]]*}"}"
@@ -50,6 +52,8 @@ if [[ "$owner" =~ ^[1-9][0-9]*$ ]]; then
           # Re-read before signalling, in case an overlapping reload won.
           if [ "$(ps -o command= -p "$owner" 2>/dev/null | sed 's/^[[:space:]]*//')" = "$running" ]; then
             kill -TERM "$owner" 2>/dev/null || true
+            # A stopped owner cannot handle TERM or release its lock until resumed.
+            kill -CONT "$owner" 2>/dev/null || true
             for ((waited=0; waited<100; waited++)); do
               if ! kill -0 "$owner" 2>/dev/null; then break; fi
               sleep 0.05

@@ -1,4 +1,4 @@
-//! One owner per tmux server. Results are shared native options, not format jobs.
+//! One owner per tmux server. Results are shared hidden environment values, not format jobs.
 use crate::{Args, metrics::Snapshot, render};
 use fs2::FileExt;
 use std::{
@@ -125,42 +125,75 @@ impl Publisher {
         let local = render::profile(snapshot, args, false);
         let remote = render::profile(snapshot, args, true);
         let json = serde_json::to_string(snapshot)?;
-        // One child per published snapshot, no shell parsing and no attach client.
+        // Batch data publication without shell parsing or a persistent attach client.
         // This connection never keeps a session/server alive.
         let status = Command::new(&self.tmux)
             .arg("-S")
             .arg(&self.socket)
             .args([
-                "set-option",
-                "-gq",
-                "@tmux-status-local",
+                "set-environment",
+                "-gh",
+                "TMUX_STATUS_LOCAL",
                 &local,
                 ";",
-                "set-option",
-                "-gq",
-                "@tmux-status-remote",
+                "set-environment",
+                "-gh",
+                "TMUX_STATUS_REMOTE",
                 &remote,
                 ";",
-                "set-option",
-                "-gq",
-                "@tmux-status-json",
+                "set-environment",
+                "-gh",
+                "TMUX_STATUS_JSON",
                 &json,
                 ";",
-                "set-option",
-                "-gq",
-                "@tmux-status-collector-pid",
+                "set-environment",
+                "-gh",
+                "TMUX_STATUS_COLLECTOR_PID",
                 &std::process::id().to_string(),
                 ";",
-                "set-option",
-                "-gq",
-                "@tmux-status-collector-version",
+                "set-environment",
+                "-gh",
+                "TMUX_STATUS_COLLECTOR_VERSION",
                 env!("CARGO_PKG_VERSION"),
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()?;
-        Ok(status.success())
+        if !status.success() {
+            return Ok(false);
+        }
+        // A refresh without -t updates only one client. Enumerate all attached
+        // clients, including clients displaying another session on this server.
+        let clients = Command::new(&self.tmux)
+            .arg("-S")
+            .arg(&self.socket)
+            .args(["list-clients", "-F", "#{client_name}"])
+            .output()?;
+        if !clients.status.success() {
+            return Ok(false);
+        }
+        let names = String::from_utf8_lossy(&clients.stdout);
+        let mut command = Command::new(&self.tmux);
+        command.arg("-S").arg(&self.socket);
+        let mut count = 0;
+        for name in names.lines().filter(|name| !name.is_empty()) {
+            if count > 0 {
+                command.arg(";");
+            }
+            command.args(["refresh-client", "-S", "-t", name]);
+            count += 1;
+        }
+        if count > 0 {
+            // A client may detach between enumeration and refresh. This is not
+            // a collector failure; remaining clients update on the next sample.
+            let _ = command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?;
+        }
+        Ok(true)
     }
 }
 

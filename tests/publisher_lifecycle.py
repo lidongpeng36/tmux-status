@@ -31,6 +31,11 @@ class Server:
         return subprocess.check_output(['tmux', '-S', self.socket, *args], text=True,
                                        stderr=subprocess.STDOUT, timeout=10)
     def option(self, option):
+        runtime = {'local', 'remote', 'json', 'collector-pid', 'collector-version', 'version'}
+        suffix = option.removeprefix('@tmux-status-')
+        if suffix in runtime:
+            name = 'TMUX_STATUS_' + suffix.upper().replace('-', '_')
+            return self.command('display-message', '-p', '#{' + name + '}').strip()
         return self.command('show-option', '-gqv', option).strip()
     def attach(self, session='one'):
         master, slave = pty.openpty()
@@ -87,7 +92,7 @@ def main():
             assert hooks.count('tmux-status-start-hook') == 1, hooks
             # Two sessions/clients still consume the same native snapshot.
             assert '#(' not in first.option('status-right')
-            assert first.option('status-right') == '#{@tmux-status-local}'
+            assert first.option('status-right') == '#{TMUX_STATUS_LOCAL}'
             rendered = first.command('display-message', '-p', '#{T:status-right}')
             assert '%#[default]' in rendered, rendered
             assert ' ' in first.option('@tmux-status-local')

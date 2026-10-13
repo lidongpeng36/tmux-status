@@ -7,16 +7,22 @@ for option in status-left status-right; do
   remote_placeholder='#{tmux_status_remote}'
   # These values already contain final text/styles. Recursive E expansion
   # inherits status strftime processing and consumes a literal % before #.
-  local_format='#{@tmux-status-local}'
-  remote_format='#{@tmux-status-remote}'
+  local_format='#{TMUX_STATUS_LOCAL}'
+  remote_format='#{TMUX_STATUS_REMOTE}'
   value="${value//$local_placeholder/$local_format}"
   value="${value//$remote_placeholder/$remote_format}"
-  tmux set-option -gq "$option" "$value"
+  # Migrate an already-interpolated pre-upgrade status without a full config reload.
+  old_local='#{@tmux-status-local}' old_remote='#{@tmux-status-remote}'
+  value="${value//$old_local/$local_format}"
+  value="${value//$old_remote/$remote_format}"
+  if [ "$(tmux show-option -gqv "$option")" != "$value" ]; then
+    tmux set-option -gq "$option" "$value"
+  fi
 done
-if [ -z "$(tmux show-option -gqv @tmux-status-local)" ]; then
-  tmux set -gq @tmux-status-local '-- #[fg=#61afef] #[default]  -- #[fg=#c678dd] #[default]' \; set -gq @tmux-status-remote '-- #[fg=#61afef] #[default]  -- #[fg=#c678dd] #[default]'
+if [ -z "$(tmux display-message -p '#{TMUX_STATUS_LOCAL}')" ]; then
+  tmux set-environment -gh TMUX_STATUS_LOCAL '-- #[fg=#61afef] #[default]  -- #[fg=#c678dd] #[default]' \; set-environment -gh TMUX_STATUS_REMOTE '-- #[fg=#61afef] #[default]  -- #[fg=#c678dd] #[default]'
 fi
-tmux set -gq @tmux-status-version "$(cat "$ROOT/VERSION")"
+tmux set-environment -gh TMUX_STATUS_VERSION "$(cat "$ROOT/VERSION")"
 # Shell escaping is confined to the trusted entry-point path; tmux expands the
 # socket/server formats at job creation. The Rust owner deduplicates reloads.
 printf -v start '%q' "$ROOT/scripts/start.sh"
