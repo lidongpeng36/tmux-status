@@ -9,7 +9,7 @@ use std::{
         net::UnixDatagram,
     },
     path::PathBuf,
-    process::{Command, Stdio},
+    process::Command,
     thread,
     time::Duration,
 };
@@ -27,7 +27,7 @@ fn error(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
 
-fn runtime() -> io::Result<PathBuf> {
+pub(crate) fn runtime() -> io::Result<PathBuf> {
     // Do not trust a world-writable cache or symlink for IPC/locks.
     let uid = unsafe { libc::getuid() };
     let root = std::env::temp_dir().join(format!("tmux-status-{uid}"));
@@ -106,10 +106,15 @@ impl Publisher {
         }))
     }
 
-    pub fn configuration(&self) -> Option<Args> {
+    pub fn configuration(&self) -> (Option<Args>, bool) {
         let mut buffer = [0u8; 65536];
         let mut latest = None;
+        let mut wake = false;
         while let Ok(size) = self.control.recv(&mut buffer) {
+            if &buffer[..size] == b"wake" {
+                wake = true;
+                continue;
+            }
             if let Ok(args) = serde_json::from_slice::<Args>(&buffer[..size])
                 && args.serve.as_ref() == Some(&self.socket)
                 && args.server_pid == Some(self.server_pid)
@@ -118,19 +123,38 @@ impl Publisher {
                 latest = Some(args);
             }
         }
-        latest
+        (latest, wake)
     }
 
-    pub fn publish(&self, snapshot: &Snapshot, args: &Args) -> io::Result<bool> {
+    pub fn server_gone(&self) -> bool {
+        // An RPC failure alone is not proof that tmux exited.
+        let dead = unsafe { libc::kill(self.server_pid as i32, 0) } == -1
+            && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if dead {
+            return true;
+        }
+        crate::process::output(Command::new(&self.tmux).arg("-S").arg(&self.socket).args([
+            "display-message",
+            "-p",
+            "#{pid}",
+        ]))
+        .is_ok_and(|out| {
+            out.status.success()
+                && String::from_utf8_lossy(&out.stdout).trim() != self.server_pid.to_string()
+        })
+    }
+
+    pub fn publish(
+        &self,
+        snapshot: &Snapshot,
+        args: &Args,
+        plan: &crate::policy::Plan,
+    ) -> io::Result<()> {
         let local = render::profile(snapshot, args, false);
         let remote = render::profile(snapshot, args, true);
         let json = serde_json::to_string(snapshot)?;
-        // Batch data publication without shell parsing or a persistent attach client.
-        // This connection never keeps a session/server alive.
-        let status = Command::new(&self.tmux)
-            .arg("-S")
-            .arg(&self.socket)
-            .args([
+        let out =
+            crate::process::output(Command::new(&self.tmux).arg("-S").arg(&self.socket).args([
                 "set-environment",
                 "-gh",
                 "TMUX_STATUS_LOCAL",
@@ -155,45 +179,89 @@ impl Publisher {
                 "-gh",
                 "TMUX_STATUS_COLLECTOR_VERSION",
                 env!("CARGO_PKG_VERSION"),
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        if !status.success() {
-            return Ok(false);
-        }
-        // A refresh without -t updates only one client. Enumerate all attached
-        // clients, including clients displaying another session on this server.
-        let clients = Command::new(&self.tmux)
-            .arg("-S")
-            .arg(&self.socket)
-            .args(["list-clients", "-F", "#{client_name}"])
-            .output()?;
-        if !clients.status.success() {
-            return Ok(false);
-        }
-        let names = String::from_utf8_lossy(&clients.stdout);
-        let mut command = Command::new(&self.tmux);
-        command.arg("-S").arg(&self.socket);
-        let mut count = 0;
-        for name in names.lines().filter(|name| !name.is_empty()) {
-            if count > 0 {
-                command.arg(";");
-            }
-            command.args(["refresh-client", "-S", "-t", name]);
-            count += 1;
-        }
-        if count > 0 {
-            // A client may detach between enumeration and refresh. This is not
-            // a collector failure; remaining clients update on the next sample.
-            let _ = command
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()?;
-        }
-        Ok(true)
+                ";",
+                "set-environment",
+                "-gh",
+                "TMUX_STATUS_STATE",
+                "ok",
+                ";",
+                "set-environment",
+                "-gh",
+                "TMUX_STATUS_POLICY",
+                plan.label,
+                ";",
+                "set-environment",
+                "-gh",
+                "TMUX_STATUS_INTERVAL",
+                &plan.sample.to_string(),
+                ";",
+                "set-environment",
+                "-gh",
+                "TMUX_STATUS_NETWORK_INTERVAL",
+                &plan.network.to_string(),
+                ";",
+                "set-environment",
+                "-gh",
+                "TMUX_STATUS_BINARY",
+                &std::env::current_exe()?.to_string_lossy(),
+            ]))?;
+        crate::process::check(out, "publish snapshot")?;
+        self.heartbeat(plan.sample, "active")?;
+        refresh(&self.tmux, &self.socket)
+    }
+    pub fn control_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.control.as_raw_fd()
+    }
+    pub fn activity(&self) -> io::Result<crate::policy::Activity> {
+        let out = crate::process::check(
+            crate::process::output(Command::new(&self.tmux).arg("-S").arg(&self.socket).args([
+                "list-clients",
+                "-F",
+                "#{client_flags}\t#{client_termfeatures}\t#{focus-events}",
+            ]))?,
+            "query client activity",
+        )?;
+        Ok(crate::policy::activity(&String::from_utf8_lossy(
+            &out.stdout,
+        )))
+    }
+    pub fn pause(&self) -> io::Result<()> {
+        crate::process::check(crate::process::output(Command::new(&self.tmux).arg("-S").arg(&self.socket).args([
+            "set-environment","-gh","TMUX_STATUS_STATE","paused",";",
+            "set-environment","-gh","TMUX_STATUS_POLICY","paused",";",
+            "set-environment","-gh","TMUX_STATUS_INTERVAL","0",";",
+            "set-environment","-gh","TMUX_STATUS_NETWORK_INTERVAL","0",";",
+            "set-environment","-gh","TMUX_STATUS_LOCAL","STATUS:PAUSED",";",
+            "set-environment","-gh","TMUX_STATUS_REMOTE","STATUS:PAUSED",";",
+            "set-environment","-gh","TMUX_STATUS_JSON",r#"{"cpu_percent":null,"memory":null,"load_per_core":null,"battery":null,"battery_error":false,"reachability":"unknown"}"#,
+        ]))?,"pause metrics")?;
+        Ok(())
+    }
+    pub fn heartbeat(&self, interval: u64, mode: &str) -> io::Result<()> {
+        let heartbeat = runtime()?.join(format!("{}.heartbeat", self.server_pid));
+        let temporary = heartbeat.with_extension(format!("{}.tmp", std::process::id()));
+        use std::io::Write;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&temporary)?;
+        writeln!(
+            file,
+            "{} {} {} {}",
+            std::process::id(),
+            interval,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            mode
+        )?;
+        fs::rename(temporary, heartbeat)?;
+        Ok(())
     }
 }
 
@@ -202,4 +270,38 @@ impl Drop for Publisher {
         let _ = fs::remove_file(&self.path);
         // File drop releases flock. No PID-file signalling, no kill-by-name.
     }
+}
+
+/// Best effort per-client refresh; disconnected clients are retried next sample.
+pub(crate) fn refresh(tmux: &std::path::Path, socket: &std::path::Path) -> io::Result<()> {
+    let clients = crate::process::check(
+        crate::process::output(Command::new(tmux).arg("-S").arg(socket).args([
+            "list-clients",
+            "-F",
+            "#{client_name}",
+        ]))?,
+        "list clients",
+    )?;
+    let names = String::from_utf8_lossy(&clients.stdout);
+    let mut command = Command::new(tmux);
+    command.arg("-S").arg(socket);
+    let mut count = 0;
+    for name in names.lines().filter(|s| !s.is_empty()) {
+        if count > 0 {
+            command.arg(";");
+        }
+        command.args(["refresh-client", "-S", "-t", name]);
+        count += 1;
+    }
+    if count > 0 {
+        let out = crate::process::output(&mut command)?;
+        crate::process::check(out, "refresh clients")?;
+    }
+    Ok(())
+}
+
+pub fn wake(pid: u32) -> io::Result<()> {
+    let path = runtime()?.join(format!("{pid}.sock"));
+    UnixDatagram::unbound()?.send_to(b"wake", path)?;
+    Ok(())
 }

@@ -46,7 +46,7 @@ def main():
             producer.write_text("import time\nprint('\\033[?1049h\\033[HSTABLE_SELECTION_SENTENCE',end='',flush=True)\nfor n in range(300):\n print('\\033[15;1Hlive-output-'+str(n),end='',flush=True)\n time.sleep(.1)\n")
             inner = base/'inner'; sockets.append(inner)
             config = base/'tmux.conf'
-            config.write_text("set -g default-terminal tmux-256color\nset -g status-interval 30\nset -g status-right-length 120\nset -g @tmux-status-network off\nset -g @tmux-status-interval 1\nset -g @tmux-status-cpu-label 'CPU:'\nset -g @tmux-status-mem-label 'MEM:'\nset -g @tmux-status-bin " + shlex.quote(str(BINARY)) + "\nset -g status-right '#{tmux_status}'\nrun-shell " + shlex.quote(str(ROOT/'tmux-status.tmux')) + '\n')
+            config.write_text("set -g default-terminal tmux-256color\nset -g status-interval 30\nset -g status-right-length 120\nset -g @tmux-status-adaptive off\nset -g @tmux-status-network off\nset -g @tmux-status-interval 1\nset -g @tmux-status-cpu-label 'CPU:'\nset -g @tmux-status-mem-label 'MEM:'\nset -g @tmux-status-bin " + shlex.quote(str(BINARY)) + "\nset -g status-right '#{tmux_status}'\nrun-shell " + shlex.quote(str(ROOT/'tmux-status.tmux')) + '\n')
             tmux(inner, '-f', str(config), 'new', '-d', '-x', '140', '-y', '24',
                  shlex.join(['python3', str(producer)]))
             first = attach(inner)

@@ -156,6 +156,52 @@ address change resets backoff, normally within five seconds. Not every default
 route or proxy change changes an interface/address fingerprint. Configure targets
 appropriate for your environment instead of treating one public site as universal.
 
+## Automatic sampling policy
+
+No extra configuration is needed. Server mode enables adaptive sampling by
+default; standalone streaming keeps its explicitly requested interval.
+
+| Situation | CPU/memory | Network probes |
+| --- | --- | --- |
+| Active client, external power or unknown power state | 5 seconds | 30 seconds |
+| Active client, battery power | at least 10 seconds | at least 60 seconds |
+| Low Power Mode | at least 30 seconds | at least 300 seconds |
+| All clients explicitly unfocused for 30 seconds | at least 30 seconds | at least 300 seconds |
+| No attached clients for 30 seconds | paused | paused |
+
+Existing interval options remain the baseline; automatic policy only increases
+intervals. Any focused client keeps the server active. Unknown focus capability,
+disabled `focus-events`, or failed client queries are treated conservatively as
+active. Focus is not window visibility; an unfocused terminal may still be visible.
+True window occlusion and propagating a remote client's battery state are outside
+this policy. Power always refers to the host running the collector.
+
+macOS uses IOKit power source information and the public Low Power Mode property.
+Linux uses power-supply sysfs and, where available, the ACPI `low-power` platform
+profile. Unsupported power information leaves normal sampling enabled. Power is
+checked with native APIs/files at most every 30 seconds, and on client wake events;
+no `pmset` subprocess runs on the sampling path.
+
+Attach/detach and focus hooks wake the existing collector through its private IPC
+socket. Resume publishes a fresh baseline and then a CPU delta after 250 ms, rather
+than displaying an average over the paused period. Pausing blocks the network
+worker, including interface scanning; an already in-flight bounded request may
+finish. While paused, only a 30-second client-state safety check and heartbeat
+remain. The monitor also reduces its checks and uses child-exit signals for prompt
+crash recovery. Deliberate pause is reported as `paused`, never `STALE`.
+
+The only new optional switch is:
+
+```tmux
+set -g @tmux-status-adaptive off  # opt out; retain fixed configured intervals
+```
+
+Inspect effective behavior with `#{TMUX_STATUS_POLICY}`,
+`#{TMUX_STATUS_INTERVAL}` and `#{TMUX_STATUS_NETWORK_INTERVAL}`. Zero intervals
+mean paused. Event hooks preserve other plugins' hooks and remain singletons on
+reload. Focus-aware throttling requires tmux's `focus-events on`; when absent,
+attach and power policies still work.
+
 ## Lifecycle
 
 TPM starts a tmux-owned `run-shell -b` job. A private directory (0700), protected
@@ -184,11 +230,37 @@ Do not mix the new entry point with an old collector binary. Release deployment
 must ship the entry point, launcher and matching binary together.
 
 The first snapshot is immediate; a second CPU sample after 250 ms establishes
-an interval delta. Pipe-close notification and handled termination signals stop
-the owner and clean its control socket. An uncatchable SIGKILL can leave a stale
-socket; the next start safely replaces it while holding the lock. Zero-byte lock
-files are retained deliberately to avoid unlink/open races, and do not indicate
-running processes. Reload or client attach repairs a crashed collector.
+an interval delta. A failed tmux publication/query is logged and retried without
+throwing away the CPU baseline. An RPC failure alone is not treated as server
+shutdown. RPC calls have a three-second deadline.
+
+The TPM launcher now runs one lightweight Rust monitor plus one collector per
+tmux server. The monitor is a tmux-owned job, not a system service. It observes its
+own worker exit and restarts it after 1, 2, 4, ... up to 30 seconds; 30 seconds of
+worker uptime resets the delay. Reload updates the existing collector through IPC
+without creating another monitor. Managed upgrades stop the old monitor and its
+owned worker group before handing over.
+
+Each successful publication writes a private heartbeat with worker PID and sample
+interval. If publication stops for `max(15 seconds, 3 * interval)`, the monitor
+terminates only its owned worker process group and starts a replacement. During
+recovery both status profiles show `STATUS:STALE`, `TMUX_STATUS_STATE` is
+`starting` or `restarting`, and JSON metrics are invalidated. Healthy publication
+sets the state to `ok`. Neither status update uses `set-option`, so this does not
+reintroduce pane redraws or freeze application output.
+
+Inspect `TMUX_STATUS_SUPERVISOR_PID`, `TMUX_STATUS_STATE`, and `TMUX_STATUS_LOG`
+with `tmux display-message -p`. The log is in the private per-user runtime directory
+and records worker exits, stderr, retry delays, and heartbeat expiry, bounded to
+approximately 256 KiB. Heartbeats and lock files are private too. The monitor owns
+its worker's process group; it never signals a PID merely read from an option.
+Server pipe closure or handled termination cleans up the worker and monitor.
+A competing invocation only updates configuration. Reload/attach can repair a
+monitor that itself was forcibly killed; there is no external OS watchdog.
+
+The added monitor is deliberate: the metric collector cannot restart itself after
+SIGKILL. This preserves one actual metric collector per server at the cost of one
+small additional process. Standalone stdout/JSON streaming remains unmonitored.
 
 ## Collectors and metric definitions
 
@@ -237,6 +309,8 @@ cargo build --release --locked
 python3 tests/smoke.py
 python3 tests/installer.py
 python3 tests/cold_install_lifecycle.py
+python3 tests/adaptive.py
+python3 tests/recovery.py
 python3 tests/redraw.py
 python3 tests/publisher_lifecycle.py
 python3 tests/tmux_lifecycle.py

@@ -54,7 +54,17 @@ def main():
             for _ in range(3):tmux('run-shell',str(plugin/'tmux-status.tmux'))
             time.sleep(.7);assert option('@tmux-status-collector-pid')==replacement
             assert ' ' in option('@tmux-status-local')
-            print(json.dumps({'invalid_configuration_kept_old_owner':True,'managed_upgrade':True,'stopped_owner_handoff':True,'unrelated_process_preserved':True,'reload_reuses_new_owner':True}))
+            # Future managed upgrades must retire the monitor too, otherwise
+            # it would immediately respawn the worker we just stopped.
+            monitor=tmux('display','-p','#{TMUX_STATUS_SUPERVISOR_PID}')
+            newer=cache/'tmux-status-next-managed';shutil.copy2(BIN,newer)
+            tmux('set','-g','@tmux-status-bin',str(newer))
+            tmux('run-shell',str(plugin/'tmux-status.tmux'))
+            wait(lambda:option('@tmux-status-collector-pid') not in ('',replacement))
+            wait(lambda:not alive(replacement) and not alive(monitor))
+            next_monitor=tmux('display','-p','#{TMUX_STATUS_SUPERVISOR_PID}')
+            assert next_monitor!=monitor and alive(next_monitor)
+            print(json.dumps({'invalid_configuration_kept_old_owner':True,'managed_upgrade':True,'stopped_owner_handoff':True,'monitor_upgrade_handoff':True,'unrelated_process_preserved':True,'reload_reuses_new_owner':True}))
         finally:
             try:tmux('kill-server')
             except subprocess.CalledProcessError:pass

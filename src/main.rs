@@ -2,8 +2,11 @@ mod appearance;
 mod metrics;
 mod network;
 mod platform;
+mod policy;
+mod process;
 mod publisher;
 mod render;
+mod supervisor;
 
 use clap::Parser;
 use metrics::{Reachability, Snapshot};
@@ -33,6 +36,18 @@ pub struct Args {
     #[arg(long)]
     #[serde(default)]
     check_config: bool,
+    /// Disable automatic attach/focus/power throttling in server mode.
+    #[arg(long)]
+    #[serde(default)]
+    no_adaptive: bool,
+    /// Wake the existing collector after a tmux client state change.
+    #[arg(long, requires = "serve")]
+    #[serde(skip)]
+    wake: bool,
+    /// Supervise the TPM launcher, restarting failed workers with backoff.
+    #[arg(long, requires = "serve")]
+    #[serde(skip)]
+    supervise: Option<PathBuf>,
     /// Print a single snapshot and exit (CPU is unknown without a previous sample).
     #[arg(long)]
     once: bool,
@@ -112,6 +127,7 @@ pub struct Args {
 impl Args {
     fn network_config(&self) -> network::Config {
         network::Config {
+            paused: false,
             tcp: self.probe,
             http: self.network,
             urls: if self.check_url.is_empty() {
@@ -130,8 +146,12 @@ impl Args {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn wait_for_next_sample(deadline: Instant) -> io::Result<bool> {
+    wait_for_event(deadline, None)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_event(deadline: Instant, wake: Option<std::os::fd::RawFd>) -> io::Result<bool> {
     // Poll only for pipe closure/errors, not POLLOUT (which is always ready).
     // This lets tmux own the lifecycle even when our next write is minutes away.
     loop {
@@ -139,20 +159,26 @@ fn wait_for_next_sample(deadline: Instant) -> io::Result<bool> {
         if stopped() {
             return Ok(false);
         }
-        if now >= deadline {
+        if now >= deadline || supervisor::child_changed() {
             return Ok(true);
         }
         let timeout = deadline
             .duration_since(now)
             .as_millis()
             .min(i32::MAX as u128) as i32;
-        let mut fd = libc::pollfd {
-            fd: libc::STDOUT_FILENO,
-            events: 0,
-            revents: 0,
-        };
-        // SAFETY: one initialized pollfd, writable for the duration of the call.
-        let n = unsafe { libc::poll(&mut fd, 1, timeout.max(1)) };
+        let mut fds = [
+            libc::pollfd {
+                fd: libc::STDOUT_FILENO,
+                events: 0,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: wake.unwrap_or(-1),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout.max(1)) };
         if n < 0 {
             let e = io::Error::last_os_error();
             if e.kind() == io::ErrorKind::Interrupted {
@@ -160,14 +186,17 @@ fn wait_for_next_sample(deadline: Instant) -> io::Result<bool> {
             }
             return Err(e);
         }
-        if fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        if fds[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
             return Ok(false);
+        }
+        if fds[1].revents & libc::POLLIN != 0 {
+            return Ok(true);
         }
     }
 }
 
 #[cfg(target_os = "macos")]
-fn wait_for_next_sample(deadline: Instant) -> io::Result<bool> {
+fn wait_for_event(deadline: Instant, wake: Option<std::os::fd::RawFd>) -> io::Result<bool> {
     use nix::sys::{
         event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue},
         time::TimeSpec,
@@ -183,10 +212,21 @@ fn wait_for_next_sample(deadline: Instant) -> io::Result<bool> {
         0,
         0,
     );
-    let mut events = [event];
+    let mut changes = vec![event];
+    if let Some(fd) = wake {
+        changes.push(KEvent::new(
+            fd as usize,
+            EventFilter::EVFILT_READ,
+            EvFlags::EV_ADD | EvFlags::EV_CLEAR,
+            FilterFlag::empty(),
+            0,
+            0,
+        ));
+    }
+    let mut events = [event; 2];
     queue
         .kevent(
-            &[event],
+            &changes,
             &mut [],
             Some(*TimeSpec::from_duration(Duration::ZERO).as_ref()),
         )
@@ -196,7 +236,7 @@ fn wait_for_next_sample(deadline: Instant) -> io::Result<bool> {
         if stopped() {
             return Ok(false);
         }
-        if now >= deadline {
+        if now >= deadline || supervisor::child_changed() {
             return Ok(true);
         }
         let timeout = TimeSpec::from_duration(deadline.duration_since(now));
@@ -205,12 +245,16 @@ fn wait_for_next_sample(deadline: Instant) -> io::Result<bool> {
             Err(nix::errno::Errno::EINTR) => continue,
             Err(e) => return Err(io::Error::from(e)),
         };
-        if count > 0
-            && events[0]
+        for event in &events[..count] {
+            if event
                 .flags()
                 .intersects(EvFlags::EV_EOF | EvFlags::EV_ERROR)
-        {
-            return Ok(false);
+            {
+                return Ok(false);
+            }
+            if event.filter() == Ok(EventFilter::EVFILT_READ) {
+                return Ok(true);
+            }
         }
     }
 }
@@ -218,17 +262,14 @@ fn wait_for_next_sample(deadline: Instant) -> io::Result<bool> {
 fn run(mut args: Args) -> io::Result<()> {
     let publisher = if args.serve.is_some() {
         match publisher::Publisher::enter(&args)? {
-            Some(owner) => Some(owner),
+            Some(p) => Some(p),
             None => return Ok(()),
         }
     } else {
         None
     };
-    let worker = if args.once {
-        None
-    } else {
-        Some(network::worker(args.network_config()))
-    };
+    let mut worker: Option<network::Worker> = None;
+    let mut configured: Option<network::Config> = None;
     let mut network_update: Option<network::Update> = None;
     let mut collector = platform::Collector::new();
     let mut battery = None;
@@ -236,84 +277,180 @@ fn run(mut args: Args) -> io::Result<()> {
     let mut next_battery = Instant::now();
     let stdout = io::stdout();
     let mut output = stdout.lock();
-    let mut first = true;
+    let mut policy = policy::Policy::new();
+    let mut power = policy::PowerReader::new();
+    let mut previous: Option<policy::Plan> = None;
+    let mut next_sample = Instant::now();
+    let mut prime = true;
+    let mut warm_until = None;
+    let mut pause_published = false;
     loop {
         let started = Instant::now();
-        if let Some(owner) = &publisher
-            && let Some(updated) = owner.configuration()
-        {
-            if updated.network_config() != args.network_config() {
-                network_update = None;
-                if let Some(worker) = &worker {
-                    worker.configure(updated.network_config());
-                }
-            }
-            args = updated;
-        }
-        let (cpu_percent, memory, load_per_core) =
-            collector.sample(args.load || publisher.is_some());
-        if (!args.no_battery || publisher.is_some()) && started >= next_battery {
-            match platform::battery() {
-                Ok(value) => {
-                    battery = value;
-                    battery_error = false;
-                }
-                Err(_) => {
-                    battery = None;
-                    battery_error = true;
-                }
-            }
-            next_battery = started + Duration::from_secs(args.battery_interval);
-        }
-        if let Some(worker) = &worker {
-            for update in worker.updates.try_iter() {
-                if update.config == args.network_config() {
-                    network_update = Some(update);
-                }
-            }
-        }
-        let reachability = (args.probe.is_some() || args.network).then(|| {
-            if args.once {
-                network::once(&args.network_config())
-            } else if let Some(update) = &network_update {
-                if started < update.expires {
-                    update.state
-                } else {
-                    Reachability::Unknown
-                }
-            } else {
-                Reachability::Unknown
-            }
-        });
-        let snapshot = Snapshot {
-            cpu_percent,
-            memory,
-            load_per_core,
-            battery,
-            battery_error,
-            reachability,
-        };
+        let mut wake = false;
         if let Some(owner) = &publisher {
-            if !owner.publish(&snapshot, &args)? {
-                return Ok(());
+            let (updated, signalled) = owner.configuration();
+            wake = signalled;
+            if let Some(updated) = updated {
+                args = updated;
+                wake = true;
+            }
+        }
+        let adaptive = publisher.is_some() && !args.no_adaptive;
+        let activity = if adaptive {
+            publisher.as_ref().unwrap().activity().unwrap_or_else(|e| {
+                eprintln!("tmux-status: activity unavailable: {e}");
+                policy::Activity::Active
+            })
+        } else {
+            policy::Activity::Active
+        };
+        // Do not inspect power sources while paused and still detached.
+        let paused = previous.is_some_and(|p| p.paused) && activity == policy::Activity::Detached;
+        let plan = if adaptive {
+            policy.evaluate(
+                started,
+                activity,
+                if paused {
+                    policy::Power::default()
+                } else {
+                    power.get(wake)
+                },
+                args.interval,
+                args.probe_interval,
+            )
+        } else {
+            policy::Plan::fixed(args.interval, args.probe_interval)
+        };
+        let mut effective = args.network_config();
+        effective.paused = plan.paused;
+        effective.interval = plan.network.max(1);
+        if !args.once && configured.as_ref() != Some(&effective) {
+            if let Some(w) = &worker {
+                w.configure(effective.clone());
+            } else {
+                worker = Some(network::worker(effective.clone()));
+            }
+            network_update = None;
+            configured = Some(effective.clone());
+        }
+        if plan.paused {
+            if let Some(owner) = &publisher {
+                if !pause_published {
+                    match owner.pause() {
+                        Ok(()) => pause_published = true,
+                        Err(e) => eprintln!("tmux-status: pause publication failed: {e}"),
+                    }
+                }
+                owner.heartbeat(30, "paused")?;
             }
         } else {
-            let line = if args.json {
-                serde_json::to_string(&snapshot)?
-            } else {
-                render::render(&snapshot, &args)
-            };
-            writeln!(output, "{line}")?;
-            output.flush()?;
+            pause_published = false;
+            let resumed = previous.is_some_and(|p| p.paused || plan.sample < p.sample);
+            if resumed {
+                collector = platform::Collector::new();
+                prime = true;
+                warm_until = None;
+                next_battery = started;
+            }
+            if previous != Some(plan) || (wake && activity == policy::Activity::Active) {
+                next_sample = started;
+            }
+            if let Some(until) = warm_until {
+                next_sample = next_sample.max(until);
+            }
+            if started >= next_sample {
+                let (cpu_percent, memory, load_per_core) =
+                    collector.sample(args.load || publisher.is_some());
+                if (!args.no_battery || publisher.is_some()) && started >= next_battery {
+                    match platform::battery() {
+                        Ok(value) => {
+                            battery = value;
+                            battery_error = false;
+                        }
+                        Err(_) => {
+                            battery = None;
+                            battery_error = true;
+                        }
+                    }
+                    next_battery = started + Duration::from_secs(args.battery_interval);
+                }
+                if let Some(w) = &worker {
+                    for update in w.updates.try_iter() {
+                        if update.config == effective {
+                            network_update = Some(update);
+                        }
+                    }
+                }
+                let reachability = (args.probe.is_some() || args.network).then(|| {
+                    if args.once {
+                        network::once(&effective)
+                    } else if let Some(update) = &network_update {
+                        if started < update.expires {
+                            update.state
+                        } else {
+                            Reachability::Unknown
+                        }
+                    } else {
+                        Reachability::Unknown
+                    }
+                });
+                let snapshot = Snapshot {
+                    cpu_percent,
+                    memory,
+                    load_per_core,
+                    battery,
+                    battery_error,
+                    reachability,
+                };
+                if let Some(owner) = &publisher {
+                    if let Err(error) = owner.publish(&snapshot, &args, &plan) {
+                        eprintln!("tmux-status: publication failed: {error}");
+                        if owner.server_gone() {
+                            eprintln!("tmux-status: original server ended; stopping collector");
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    let line = if args.json {
+                        serde_json::to_string(&snapshot)?
+                    } else {
+                        render::render(&snapshot, &args)
+                    };
+                    writeln!(output, "{line}")?;
+                    output.flush()?;
+                }
+                warm_until = if prime {
+                    Some(started + Duration::from_millis(250))
+                } else {
+                    None
+                };
+                next_sample = started
+                    + if prime {
+                        Duration::from_millis(250)
+                    } else {
+                        Duration::from_secs(plan.sample)
+                    };
+                prime = false;
+            }
         }
-        // Establish a real CPU delta promptly instead of waiting the full 5s.
-        let delay = if first {
-            Duration::from_millis(250)
+        previous = Some(plan);
+        if args.once {
+            return Ok(());
+        }
+        let mut deadline = if plan.paused {
+            started + Duration::from_secs(30)
         } else {
-            Duration::from_secs(args.interval)
+            next_sample
         };
-        first = false;
-        if args.once || !wait_for_next_sample(started + delay)? {
+        if adaptive {
+            deadline = deadline.min(started + Duration::from_secs(30));
+            if let Some(transition) = policy.transition_due()
+                && transition > started
+            {
+                deadline = deadline.min(transition);
+            }
+        }
+        if !wait_for_event(deadline, publisher.as_ref().map(|p| p.control_fd()))? {
             return Ok(());
         }
     }
@@ -333,6 +470,10 @@ fn main() {
     }
     let _ = STOP.set(stop);
     let mut args = Args::parse();
+    if args.wake {
+        let _ = publisher::wake(args.server_pid.unwrap());
+        return;
+    }
     let configured = (|| -> Result<appearance::Appearance, String> {
         let mut style =
             appearance::Appearance::load(args.appearance_file.as_deref(), &args.appearance_input)?;
@@ -365,7 +506,12 @@ fn main() {
     if args.check_config {
         return;
     }
-    if let Err(e) = run(args)
+    let result = if args.supervise.is_some() {
+        supervisor::run(args)
+    } else {
+        run(args)
+    };
+    if let Err(e) = result
         && e.kind() != io::ErrorKind::BrokenPipe
     {
         eprintln!("tmux-status: {e}");

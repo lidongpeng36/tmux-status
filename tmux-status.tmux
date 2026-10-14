@@ -34,3 +34,13 @@ indices="$(tmux show-hooks -g client-attached | awk -v tag="$TAG" 'index($0,tag)
 for index in $indices; do tmux set-hook -gu "client-attached[$index]"; done
 tmux set-hook -ga client-attached "run-shell -b ': $TAG; $command'"
 tmux run-shell -b "$command"
+
+# Event-driven wakeups avoid waiting for a background/paused sampling deadline.
+printf -v wake '%q' "$ROOT/scripts/wake.sh"
+WAKE_TAG=tmux-status-wake-hook
+for hook in client-attached client-detached client-focus-in client-focus-out; do
+  existing="$(tmux show-hooks -g "$hook" 2>/dev/null || true)"
+  indices="$(printf '%s\n' "$existing" | awk -v tag="$WAKE_TAG" 'index($0,tag) {i=index($0,"[");j=index($0,"]"); print substr($0,i+1,j-i-1)}')"
+  for index in $indices; do tmux set-hook -gu "$hook[$index]"; done
+  tmux set-hook -ga "$hook" "run-shell -b ': $WAKE_TAG; exec $wake \"#{socket_path}\" \"#{pid}\"'"
+done

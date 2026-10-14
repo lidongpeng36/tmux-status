@@ -21,7 +21,7 @@ class Server:
         self.clients = []
         with open(self.config, 'w') as f:
             f.write('set -g status-right-length 150\nset -g status-interval 1\n'
-                    'set -g @tmux-status-network off\nset -g @tmux-status-interval 1\n'
+                    'set -g @tmux-status-adaptive off\nset -g @tmux-status-network off\nset -g @tmux-status-interval 1\n'
                     'set -g @tmux-status-bin "' + BINARY + '"\n'
                     "set -g status-right '#{tmux_status}'\n"
                     "run-shell '" + PLUGIN + "'\n")

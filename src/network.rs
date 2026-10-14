@@ -15,6 +15,8 @@ pub const DEFAULT_URLS: [&str; 2] = [
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub paused: bool,
     pub tcp: Option<SocketAddr>,
     pub http: bool,
     pub urls: Vec<String>,
@@ -132,15 +134,32 @@ pub fn worker(initial: Config) -> Worker {
     thread::spawn(move || {
         let mut config = initial;
         let mut networks = sysinfo::Networks::new();
-        let mut addresses = fingerprint(&mut networks);
+        let mut addresses = Vec::new();
         let mut failures: u32 = 0;
         let mut next = Instant::now();
-        let mut http_client = if config.http {
+        let mut http_client = if config.http && !config.paused {
             client(&config).ok()
         } else {
             None
         };
         loop {
+            // A deliberate pause performs no network probes or interface scans.
+            if config.paused || (!config.http && config.tcp.is_none()) {
+                match config_rx.recv() {
+                    Ok(latest) => {
+                        config = latest;
+                        next = Instant::now();
+                        failures = 0;
+                        http_client = if config.http && !config.paused {
+                            client(&config).ok()
+                        } else {
+                            None
+                        };
+                        continue;
+                    }
+                    Err(_) => return,
+                }
+            }
             if (config.http || config.tcp.is_some()) && Instant::now() >= next {
                 let state = if let Some(target) = config.tcp {
                     probe(target, Duration::from_millis(config.timeout_ms))
@@ -171,7 +190,7 @@ pub fn worker(initial: Config) -> Worker {
                 }
             }
             let wait = if config.http || config.tcp.is_some() {
-                Duration::from_secs(5)
+                Duration::from_secs(if config.interval >= 60 { 30 } else { 5 })
                     .min(next.saturating_duration_since(Instant::now()))
                     .max(Duration::from_millis(50))
             } else {
@@ -184,7 +203,7 @@ pub fn worker(initial: Config) -> Worker {
                     }
                     if latest != config {
                         config = latest;
-                        http_client = if config.http {
+                        http_client = if config.http && !config.paused {
                             client(&config).ok()
                         } else {
                             None
@@ -196,7 +215,7 @@ pub fn worker(initial: Config) -> Worker {
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 Err(mpsc::RecvTimeoutError::Timeout) => (),
             }
-            if config.http || config.tcp.is_some() {
+            if !config.paused && (config.http || config.tcp.is_some()) {
                 let current = fingerprint(&mut networks);
                 if current != addresses {
                     addresses = current;
@@ -230,6 +249,7 @@ mod tests {
     }
     fn config() -> Config {
         Config {
+            paused: false,
             tcp: None,
             http: true,
             urls: vec![],

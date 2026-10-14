@@ -33,13 +33,15 @@ def main():
             text = subprocess.check_output(["ps", "-axo", "pid=,ppid=,command="], text=True)
             return [line.strip() for line in text.splitlines()
                     if len(line.split(None, 2)) == 3
-                    and line.split(None, 2)[2].startswith(binary + " ")]
+                    and line.split(None, 2)[2].startswith(binary + " ")
+                    and line.split(None, 2)[1] == server_pid]
 
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 160, 0, 0))
         attached = None
         try:
             tmux("-f", config, "new-session", "-d", "-s", "test", "sleep 90")
+            server_pid = tmux("display-message", "-p", "#{pid}").strip()
             attached = subprocess.Popen(["tmux", "-S", socket, "attach-session", "-t", "test"],
                                         stdin=slave, stdout=slave, stderr=slave,
                                         env={**os.environ, "TERM": "xterm-256color"})

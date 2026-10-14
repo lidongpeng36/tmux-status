@@ -17,6 +17,7 @@ ARGS=(--serve "$SOCKET" --server-pid "$SERVER_PID" --tmux-bin "$TMUX_BIN"
   --battery-interval "$(option @tmux-status-battery-interval 60)"
   --probe-interval "$(option @tmux-status-network-interval 30)"
   --network-timeout-ms "$(option @tmux-status-network-timeout-ms 2000)")
+if [ "$(option @tmux-status-adaptive on)" = off ]; then ARGS+=(--no-adaptive); fi
 if [ "$(option @tmux-status-network on)" = on ]; then ARGS+=(--network); fi
 if [ "$(option @tmux-status-network-direct off)" = on ]; then ARGS+=(--network-direct); fi
 URLS="$(option @tmux-status-check-urls '')"
@@ -38,7 +39,10 @@ for key in cpu-label mem-label separator labels; do
 # Managed binary upgrades hand over to the new release without killing tmux or
 # signalling a PID file. Verify the currently reported process's full command,
 # both its cached binary prefix and this exact socket/server identity.
-owner="$("$TMUX_BIN" -S "$SOCKET" display-message -p '#{TMUX_STATUS_COLLECTOR_PID}')"
+owner="$("$TMUX_BIN" -S "$SOCKET" display-message -p '#{TMUX_STATUS_SUPERVISOR_PID}')"
+if [ -z "$owner" ] || ! kill -0 "$owner" 2>/dev/null; then
+  owner="$("$TMUX_BIN" -S "$SOCKET" display-message -p '#{TMUX_STATUS_COLLECTOR_PID}')"
+fi
 # Legacy installed collectors still publish the old option during handoff.
 if [ -z "$owner" ]; then owner="$(option @tmux-status-collector-pid '')"; fi
 if [[ "$owner" =~ ^[1-9][0-9]*$ ]]; then
@@ -64,4 +68,7 @@ if [[ "$owner" =~ ^[1-9][0-9]*$ ]]; then
       ;;
   esac
 fi
-exec "$BIN" "${ARGS[@]}"
+if [ "${TMUX_STATUS_WORKER:-0}" = 1 ]; then
+  exec "$BIN" "${ARGS[@]}"
+fi
+exec "$BIN" "${ARGS[@]}" --supervise "$ROOT/scripts/start.sh"
