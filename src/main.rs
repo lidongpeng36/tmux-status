@@ -296,14 +296,20 @@ fn run(mut args: Args) -> io::Result<()> {
             }
         }
         let adaptive = publisher.is_some() && !args.no_adaptive;
-        let activity = if adaptive {
-            publisher.as_ref().unwrap().activity().unwrap_or_else(|e| {
-                eprintln!("tmux-status: activity unavailable: {e}");
-                policy::Activity::Active
-            })
+        let clients = if adaptive {
+            match publisher.as_ref().unwrap().clients() {
+                Ok(clients) => Some(clients),
+                Err(e) => {
+                    eprintln!("tmux-status: activity unavailable: {e}");
+                    None
+                }
+            }
         } else {
-            policy::Activity::Active
+            None
         };
+        let activity = clients
+            .as_ref()
+            .map_or(policy::Activity::Active, |c| c.activity);
         // Do not inspect power sources while paused and still detached.
         let paused = previous.is_some_and(|p| p.paused) && activity == policy::Activity::Detached;
         let plan = if adaptive {
@@ -403,7 +409,7 @@ fn run(mut args: Args) -> io::Result<()> {
                     reachability,
                 };
                 if let Some(owner) = &publisher {
-                    if let Err(error) = owner.publish(&snapshot, &args, &plan) {
+                    if let Err(error) = owner.publish(&snapshot, &args, &plan, clients.as_ref()) {
                         eprintln!("tmux-status: publication failed: {error}");
                         if owner.server_gone() {
                             eprintln!("tmux-status: original server ended; stopping collector");

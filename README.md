@@ -215,8 +215,13 @@ The owner publishes hidden global environment values `TMUX_STATUS_LOCAL`,
 `#{TMUX_STATUS_LOCAL}` and `#{TMUX_STATUS_REMOTE}`. Hidden values are not exported
 to new panes or shell jobs. User configuration remains in `@tmux-status-*` options.
 
-Each sample uses short tmux CLI calls to publish one batch, enumerate clients,
-and refresh only their status lines (`refresh-client -S -t ...`). This avoids
+With adaptive sampling enabled, each cycle queries client names and activity
+together. A published sample reuses that snapshot, publishes one batch, and
+refreshes only those status lines (`refresh-client -S -t ...`): three CLI calls
+instead of four on the normal attached path. If a client disappears before
+refresh, a fresh client query and status-only retry update the remaining clients.
+Snapshots are never cached across cycles; fixed-mode and monitor recovery still
+query clients when refreshing. This avoids
 `set-option`'s full client redraw, which can erase terminal mouse selections even
 when the application is idle. Every attached client is refreshed, across sessions.
 No collector is started per client and no control client keeps the server alive.
@@ -320,5 +325,12 @@ python3 tests/upgrade.py
 CI checks Linux and macOS. Release builds additionally test the shipped binary
 on all four OS/architecture combinations. Lifecycle tests use separate sockets,
 servers and pseudo terminals, never the user's existing tmux server.
+
+For a real terminal mouse-selection check, run `bash tests/manual-selection.sh`
+from Alacritty after building. It creates two isolated nested servers using the
+candidate binary and a one-second status refresh. Shift-drag the stable sentence
+and hold for 15 seconds; Ctrl-C ends the test and cleans up both servers. This
+does not install the candidate or alter existing sessions. Automated PTY tests
+verify repaint sequences, but do not inspect the GUI terminal's selection state.
 
 MIT licensed. Dependency licenses remain their respective authors' licenses.

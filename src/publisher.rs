@@ -23,6 +23,32 @@ pub struct Publisher {
     tmux: PathBuf,
 }
 
+/// One-cycle snapshot: policy and status refresh must see the same client query.
+pub struct Clients {
+    names: Vec<String>,
+    pub activity: crate::policy::Activity,
+}
+impl Clients {
+    fn parse(text: &str) -> Self {
+        let mut names = Vec::new();
+        let mut activity_rows = String::new();
+        for line in text.lines().filter(|line| !line.is_empty()) {
+            if let Some((name, activity)) = line.split_once('\t') {
+                names.push(name.to_owned());
+                activity_rows.push_str(activity);
+            } else {
+                // Unknown/malformed focus information must never imply hidden.
+                activity_rows.push_str("unknown");
+            }
+            activity_rows.push('\n');
+        }
+        Self {
+            names,
+            activity: crate::policy::activity(&activity_rows),
+        }
+    }
+}
+
 fn error(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
@@ -149,6 +175,7 @@ impl Publisher {
         snapshot: &Snapshot,
         args: &Args,
         plan: &crate::policy::Plan,
+        clients: Option<&Clients>,
     ) -> io::Result<()> {
         let local = render::profile(snapshot, args, false);
         let remote = render::profile(snapshot, args, true);
@@ -207,24 +234,35 @@ impl Publisher {
             ]))?;
         crate::process::check(out, "publish snapshot")?;
         self.heartbeat(plan.sample, "active")?;
+        if let Some(clients) = clients {
+            // A client may detach after the snapshot. Retry with a fresh list,
+            // never with a full-client redraw, so remaining clients still update.
+            if refresh_names(
+                &self.tmux,
+                &self.socket,
+                clients.names.iter().map(String::as_str),
+            )
+            .is_ok()
+            {
+                return Ok(());
+            }
+        }
         refresh(&self.tmux, &self.socket)
     }
     pub fn control_fd(&self) -> std::os::fd::RawFd {
         use std::os::fd::AsRawFd;
         self.control.as_raw_fd()
     }
-    pub fn activity(&self) -> io::Result<crate::policy::Activity> {
+    pub fn clients(&self) -> io::Result<Clients> {
         let out = crate::process::check(
             crate::process::output(Command::new(&self.tmux).arg("-S").arg(&self.socket).args([
                 "list-clients",
                 "-F",
-                "#{client_flags}\t#{client_termfeatures}\t#{focus-events}",
+                "#{client_name}\t#{client_flags}\t#{client_termfeatures}\t#{focus-events}",
             ]))?,
             "query client activity",
         )?;
-        Ok(crate::policy::activity(&String::from_utf8_lossy(
-            &out.stdout,
-        )))
+        Ok(Clients::parse(&String::from_utf8_lossy(&out.stdout)))
     }
     pub fn pause(&self) -> io::Result<()> {
         crate::process::check(crate::process::output(Command::new(&self.tmux).arg("-S").arg(&self.socket).args([
@@ -283,10 +321,18 @@ pub(crate) fn refresh(tmux: &std::path::Path, socket: &std::path::Path) -> io::R
         "list clients",
     )?;
     let names = String::from_utf8_lossy(&clients.stdout);
+    refresh_names(tmux, socket, names.lines())
+}
+
+fn refresh_names<'a>(
+    tmux: &std::path::Path,
+    socket: &std::path::Path,
+    names: impl Iterator<Item = &'a str>,
+) -> io::Result<()> {
     let mut command = Command::new(tmux);
     command.arg("-S").arg(socket);
     let mut count = 0;
-    for name in names.lines().filter(|s| !s.is_empty()) {
+    for name in names.filter(|s| !s.is_empty()) {
         if count > 0 {
             command.arg(";");
         }
@@ -304,4 +350,30 @@ pub fn wake(pid: u32) -> io::Result<()> {
     let path = runtime()?.join(format!("{pid}.sock"));
     UnixDatagram::unbound()?.send_to(b"wake", path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Clients;
+    use crate::policy::Activity;
+    #[test]
+    fn client_snapshot_preserves_targets_and_conservative_focus() {
+        let clients = Clients::parse(
+            "/dev/ttys001\tattached\tfocus,RGB\t1\n/dev/ttys002\tattached,focused\tfocus\t1\n",
+        );
+        assert_eq!(clients.names, ["/dev/ttys001", "/dev/ttys002"]);
+        assert_eq!(clients.activity, Activity::Active);
+        assert_eq!(
+            Clients::parse("/dev/ttys001\tattached\tfocus\t1\n").activity,
+            Activity::Background
+        );
+        assert_eq!(
+            Clients::parse("/dev/ttys001\tattached\tRGB\t1\n").activity,
+            Activity::Active
+        );
+        assert_eq!(Clients::parse("malformed").activity, Activity::Active);
+        let empty = Clients::parse("");
+        assert!(empty.names.is_empty());
+        assert_eq!(empty.activity, Activity::Detached);
+    }
 }
